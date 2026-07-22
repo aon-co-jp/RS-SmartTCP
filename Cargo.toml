@@ -1,0 +1,11 @@
+[package]
+name = "rs-smarttcp"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "IOWN/APN(光電融合ネットワーク)×Smart-TCP(AI生成通信プロトコル)に着想を得た、実測RTT/ジッターに基づく適応制御ライブラリ(決定論的ヒューリスティック、arXiv論文のSmart-TCPプロトコル自体の実装ではない)"
+repository = "https://github.com/aon-co-jp/RS-SmartTCP"
+
+[lib]
+name = "rs_smarttcp"
+path = "src/lib.rs"
