@@ -1,0 +1,73 @@
+# 開発方針・開発環境ルール(RS-SmartTCP)
+
+作業ドライブは`F:\runo`。この節は[`open-raid-z`](https://github.com/aon-co-jp/open-raid-z)の
+`CLAUDE.md`を正本とし、各プロジェクトへコピーして同期する方針に準じる。
+GitHubリポジトリ: [aon-co-jp/RS-SmartTCP](https://github.com/aon-co-jp/RS-SmartTCP)。
+
+## このプロジェクトの役割
+
+IOWN/APN(NTTのオールフォトニクス・ネットワーク)のような超低遅延・
+ジッター無し回線と、Smart-TCP(AI生成通信プロトコル)の良いとこ取り
+ハイブリッド適応制御。`open-web-server-wire`から利用される、
+`Rust-JSON`と同じ「独立リポジトリとして切り出し、必要な場所から
+path依存する」パターンの一員。
+
+## 正直な開示(最重要)
+
+> ⚠️ **本クレートは、arXiv 2512.00491("Agentic AI-based Autonomous
+> and Adaptive TCP Protocol"、"Smart-TCP")のプロトコルそのものの
+> 実装ではない。** 訓練済み機械学習モデルは使わず、「fast/slowモデル」
+> という設計思想を、TCP(RFC 6298)/QUIC(RFC 9002)が実際に使う
+> SRTT/RTTVAR(Jacobson/Karels EWMA)に基づく決定論的な2値判定として
+> 実装したもの。名前を`Smart-TCP`ではなく`RS-SmartTCP`にしたのは、
+> 実在する同名論文との混同を避けるため(ユーザー確認済み、2026-07-23)。
+>
+> IOWN/APN自体もNTTが構築する物理telecom基盤(光電融合スイッチ・
+> 光ファイバー回線)であり、本クレートが「実装」できる対象ではない
+> ——実際に行っているのは「そのような回線が来た時にソフトウェア層が
+> 足を引っ張らない」設計のみ。
+
+## 技術スタック
+
+外部依存クレート無し(標準ライブラリのみ)。`unsafe`不使用。
+
+## HANDOFF
+
+- **2026-07-23 新規作成**: ユーザー指示「光のプロトコルというAIが
+  生み出した通信プロトコルの良いとこ取りハイブリッド対応」を受けて
+  着手。日英Web検索で以下を裏取り:
+  - IOWN/APN: 日本-台湾間3,000kmで約17ms・ジッター無しを実証済み
+    ([digitimes: NTT IOWN 2026](https://www.digitimes.com/news/a20251007PD227/ntt-iown-infrastructure-launch-2026.html))。
+  - Smart-TCP: arXiv 2512.00491、"Agentic AI-based Autonomous and
+    Adaptive TCP Protocol"、fast/slowの2モデルによる判断構造。
+  - RTT/ジッター推定の実装方式: 当初は固定ウィンドウ+標準偏差方式で
+    実装したが、ユーザー指示による再検証の結果、TCP(RFC 6298)/
+    QUIC(RFC 9002)が実際に使うSRTT/RTTVAR(Jacobson/Karels EWMA)へ
+    書き換えた——O(1)更新で済み、かつこのエコシステムが既に使う
+    QUICの輻輳制御と同じ枯れたアルゴリズムであるため。
+  - 当初`open-web-server-wire`内の`adaptive_channel`モジュールとして
+    実装したが、`Rust-JSON`と同じ「独立リポジトリへ切り出し、path依存
+    する」パターンに合わせ、このリポジトリへ切り出した。
+  - **検証**: `cargo test` 6件全green(photonic-class/standard-class
+    判定・RFC 6298初回サンプル特別扱い・Fast/Slowモード切替・
+    ジッター増加時のFastからSlowへの降格を実証)。
+  - VPS(`ssh conoha`、`/root/RS-SmartTCP`)へもclone・ビルド確認済み。
+  - 次にすべきこと: (1) `open-web-server-ledger::Ledger`の
+    `retry_backoff`を`AdaptivePolicy`経由に実際に配線する(現状は
+    独立クレートとして存在するのみ、呼び出し元は未接続)、
+    (2) `open-web-server-wire::udp_channel`等の他の通信層からも
+    `NetworkQualityMonitor`を使う配線の検討。
+
+## 関連プロジェクト
+
+- [open-raid-z](https://github.com/aon-co-jp/open-raid-z) — 開発ルールの正本。
+- [open-web-server](https://github.com/aon-co-jp/open-web-server) — 本クレートの利用元
+  (`open-web-server-wire::accel`/通信層四重化)。
+- [RPoem](https://github.com/aon-co-jp/RPoem) — Apache+Tomcatに例えると
+  Tomcat役、`open-web-server`と対になるアプリケーションサーバー層。
+
+## エコシステム全体マップ
+
+同時並行開発の対象プロジェクト一覧・各リポジトリの現況は
+[`open-raid-z`のCLAUDE.md](https://github.com/aon-co-jp/open-raid-z/blob/main/CLAUDE.md)
+「関連プロジェクト」節を参照。
