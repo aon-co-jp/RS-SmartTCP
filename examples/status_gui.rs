@@ -107,6 +107,19 @@ fn render_page(
         })
         .collect();
 
+    let diagnoses = state.paths.diagnose(&report);
+    let diagnostics_html: String = diagnoses
+        .iter()
+        .map(|d| {
+            format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                html_escape(&d.name),
+                d.health.label_ja(),
+                html_escape(&d.reason_ja)
+            )
+        })
+        .collect();
+
     let error_html = probe_error
         .map(|e| format!("<p style=\"color:#c33;\">Probe failed / 疎通確認に失敗しました: {}</p>", html_escape(e)))
         .unwrap_or_default();
@@ -226,6 +239,14 @@ fn render_page(
 <tr><th>Name / 名前</th><th>Kind / 種別</th><th>Response time / 応答時間</th></tr>
 {device_rows}
 </table>
+
+<h2>Link diagnostics / 通信品質の診断</h2>
+<p style="font-size:0.85em; color:#666;">Detects disconnected/unstable/degraded links from OS connection status and RTT/RTTVAR — not a physical cable sensor, but an inference from measured data. / OS上の接続状態とRTT/RTTVAR実測値から、断線・不安定・低速な経路を推測します(物理的なケーブルセンサーではありません)。</p>
+<table border="1" cellpadding="6" style="border-collapse: collapse;">
+<tr><th>Link / 経路</th><th>Health / 状態</th><th>Reason / 理由</th></tr>
+{diagnostics_html}
+</table>
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: "automatic improvement" here means best_path already routes traffic to the lowest-RTT healthy link — this cannot physically repair a cable. / 正直な開示: ここでの「自動改善」はbest_pathが既にRTTの最も低い健全な経路へ自動的にトラフィックを寄せていることを指します——物理的なケーブルの修復はできません。</p>
 {error_html}
 <form method="post" action="/probe" style="margin-top: 12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
 <input type="text" name="name" placeholder="Name / 名前 (e.g. NAS)" required>

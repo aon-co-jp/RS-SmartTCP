@@ -174,6 +174,25 @@ impl MultiPathManager {
         let paths = self.paths.lock().unwrap();
         paths.iter().map(|(name, entry)| (name.clone(), entry.kind, entry.monitor.smoothed_rtt_ms())).collect()
     }
+
+    /// [`crate::link_diagnostics`]向けの診断一覧を組み立てる。登録済み
+    /// 経路それぞれについて、`report`側の接続状態と、内部の
+    /// `NetworkQualityMonitor`が持つSRTT/RTTVARをスナップショットとして
+    /// 渡す(`PathEntry`自体は非公開のため、値だけを取り出して橋渡しする
+    /// 設計)。
+    pub fn diagnose(&self, report: &crate::network_interfaces::NetworkInterfaceReport) -> Vec<crate::link_diagnostics::LinkDiagnosis> {
+        let snapshots: Vec<(String, bool, Option<f64>, Option<f64>)> = {
+            let paths = self.paths.lock().unwrap();
+            paths
+                .iter()
+                .map(|(name, entry)| {
+                    let connected = report.interfaces.iter().find(|i| &i.name == name).map(|i| i.connected).unwrap_or(true);
+                    (name.clone(), connected, entry.monitor.smoothed_rtt_ms(), entry.monitor.rttvar_ms())
+                })
+                .collect()
+        };
+        crate::link_diagnostics::diagnose_all_from_snapshots(report, &snapshots)
+    }
 }
 
 impl Default for MultiPathManager {

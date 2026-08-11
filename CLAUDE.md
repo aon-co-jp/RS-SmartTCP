@@ -33,6 +33,51 @@ path依存する」パターンの一員。
 
 ## HANDOFF
 
+- **2026-08-11(続き13) 経路選択の東芝SBM最適化(`path_optimizer.rs`)+
+  通信品質診断・GUI表示(`link_diagnostics.rs`)を新設(ユーザー指示
+  「RS-SmartTCP内に具体的な最適化問題…を発見して実装」+「通信品質に
+  何が原因で問題があるか特定…断線/不安定をGUIで明白に表示、可能なら
+  自動で改善する機能」への対応)**:
+  1. **`path_optimizer.rs`**: `aruaru-llm::cache_optimizer`と同じ
+     QUBO→Ising→Ballistic Simulated Bifurcationのアルゴリズムを
+     (循環依存の都合上)独立実装し、「帯域/電力予算の下で通信品質
+     (RTT逆数)の合計を最大化する経路の組み合わせを選ぶ」という
+     0/1ナップサック問題として定式化・解決する`optimize_path_selection`
+     を実装。**正直な開示**: 経路数(最大10程度)は全探索でも瞬時に
+     解けるため実用上の必要性は薄く、「SBMを実際の意思決定パスへ
+     配線する統合実証」が目的。テスト`sbm_path_selection_matches_
+     brute_force_within_75_percent`で、あえて解きにくい合成データ
+     (コスト・品質の分布が偏った5経路)を使い、複数の予算全てで全探索
+     最適値の75%以上を達成することを確認(初期実装ではrestarts/attempts
+     不足で53%程度しか出ないケースを発見し、restarts=64/attempts=24へ
+     調整して解消——誇張せず、実際に見つかった性能不足とその対処を記録)。
+  2. **`link_diagnostics.rs`+`MultiPathManager::diagnose`**: 接続状態
+     (OS上のリンクアップ/ダウン)+RTT/RTTVAR実測値から、経路ごとに
+     `Disconnected`(断線の可能性)/`Unstable`(RTTVARが閾値以上、
+     断線しかかっている兆候)/`Degraded`(RTTが高い)/`Healthy`/`Unknown`
+     を判定。**正直な開示(最重要)**: 物理的なケーブル断線を検知する
+     ハードウェアセンサーは無く、OS報告+RTT統計からの推測に留まる。
+     「自動改善」は`MultiPathManager::best_path`が既に行っている
+     「最もRTTが低い健全な経路へトラフィックを寄せる」仕組みを指し、
+     物理的な配線修復はできないことを明記。`recommend_healthiest`で
+     `Healthy`>`Degraded`の優先順位に基づく推奨経路を返す(`Unstable`/
+     `Disconnected`は除外)。
+  3. **GUI配線**: `status_gui.rs`に「Link diagnostics / 通信品質の診断」
+     セクションを追加し、経路ごとの状態(絵文字バッジ🔴🟠🟡🟢⚪)+
+     理由を日英併記で表示。実機でイーサネット3本中2本が未接続(🔴)、
+     残り1本(接続中)がまだ測定待ち(⚪)と正しく表示されることを
+     `curl`で確認済み。
+  4. **検証**: `cargo test --lib`**80件全green**(既存72件+
+     `path_optimizer`3件+`link_diagnostics`5件)。`cargo build --example
+     status_gui`成功、実機起動して`curl`でGUI出力を確認。
+  - 次にすべきこと: (1) `path_optimizer`を実際の経路アクティブ化/
+    非アクティブ化(`router_features`や実際の帯域制御)へ配線する、
+    (2) `link_diagnostics`の閾値(RTTVAR 30ms等)は経験則のため、
+    実運用データが増えたら再調整を検討、(3) DeepSeekの「GPU数千枚を
+    1枚に凝縮する技術」については、`dream-os`側で既に日英調査済みで
+    実在しないと確認済み(2026-08-06 HANDOFF参照)——ユーザーから
+    新たな情報源が示されない限り再調査・実装はしない方針を維持。
+
 - **2026-08-11(続き12) 4層暗号化通信(`secure_channel.rs`)+RAID-Z2/Z3
   パリティ高速化ブリッジ(`raid_bridge.rs`)を新設(ユーザー指示「通信と
   DATABASEの4層4重暗号化セキュリティ通信とDATABSEとRAID6のZ2やZ3対応で

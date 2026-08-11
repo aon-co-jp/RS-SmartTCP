@@ -68,6 +68,8 @@ pub mod maintenance;
 pub mod multi_path;
 pub mod multi_wan;
 pub mod network_interfaces;
+pub mod link_diagnostics;
+pub mod path_optimizer;
 pub mod raid_bridge;
 pub mod redundant_transmission;
 pub mod router_features;
