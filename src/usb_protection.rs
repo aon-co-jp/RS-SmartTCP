@@ -28,10 +28,26 @@
 //!   (実際のアプリ)が定期的に呼ぶか、OSのイベント通知と組み合わせる
 //!   ことを想定する。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::download_protection::{self, ScanResult, ScannerBackend};
+
+/// 「刺した瞬間」を検知するための簡易ポーリング用ヘルパー。
+///
+/// 前述の通り本クレートは`WM_DEVICECHANGE`のようなOSイベントフックを
+/// 持たないため、呼び出し側が数秒間隔で本関数を呼ぶことで「挿した瞬間」
+/// に近い検知を実現する想定(例: `status_gui.rs`や実アプリのバック
+/// グラウンドタイマーから定期呼び出し)。`seen`には前回呼び出し時点の
+/// ドライブ集合を渡し、本関数が最新の状態に更新した上で、新規に増えた
+/// ドライブだけを返す。
+pub fn poll_new_drives(seen: &mut HashSet<PathBuf>) -> Vec<PathBuf> {
+    let current: HashSet<PathBuf> = list_removable_drives().into_iter().collect();
+    let newly_inserted: Vec<PathBuf> = current.difference(seen).cloned().collect();
+    *seen = current;
+    newly_inserted
+}
 
 /// 現在接続されているリムーバブルドライブ(USBメモリ等)のドライブ
 /// レター一覧を返す。PowerShellの`Win32_LogicalDisk`(`DriveType=2`が
@@ -105,5 +121,19 @@ mod tests {
         assert!(temp.join("autorun.inf.quarantined").exists(), "content must be preserved under a quarantined name, not deleted");
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn poll_new_drives_reports_only_newly_appeared_drives_and_updates_seen_set() {
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        seen.insert(PathBuf::from(r"Z:\")); // 実在しないドライブを既知として先に登録
+
+        let newly_inserted = poll_new_drives(&mut seen);
+
+        // このテスト環境の実際のリムーバブルドライブ一覧が全て「新規」
+        // として返ってくるはず(Z:はダミーの既知ドライブなので対象外)。
+        assert!(!newly_inserted.contains(&PathBuf::from(r"Z:\")));
+        // 呼び出し後、seenは実際のドライブ集合で更新されているはず。
+        assert_eq!(seen, list_removable_drives().into_iter().collect::<HashSet<_>>());
     }
 }

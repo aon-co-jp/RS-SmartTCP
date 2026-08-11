@@ -153,9 +153,15 @@ pub fn scan_file(backend: ScannerBackend, path: &Path, quarantine_dir: &Path) ->
 
 /// KINGSOFT インターネットセキュリティ(無料版)向け。**正直な開示**:
 /// 自動スキャン用のコマンドラインAPIが存在しないため、実際に結果を
-/// 自動判定することはできない——インストール済みならスキャン画面
-/// (GUI)を開いて手動でのスキャンを促すのみ。未インストールの場合は
-/// 無料ダウンロードページ(ユーザー提供のURL、
+/// 自動判定することはできない——インストール済みなら`kscan.exe`の起動を
+/// 試みるが、**2026-08-11に実機で検証した結果、`kscan.exe`は常駐する
+/// バックグラウンドプロセス(`kxetray`/`kxescore`)へ内部的に指示を
+/// 送るだけの短命プロセスであり、単独では可視のスキャン画面を開かない
+/// ことを確認した**(起動直後に終了コード0で終了、`EnumWindows`で
+/// KINGSOFT関連の可視ウィンドウは検出できず)。そのため「スキャン画面が
+/// 開いた」とは主張せず、タスクトレイ(`kxetray`)アイコンから手動で
+/// スキャンを開始するよう正直に案内する。未インストールの場合は無料
+/// ダウンロードページ(ユーザー提供のURL、
 /// https://www.kingsoft.jp/is/download)を案内する。
 fn scan_file_kingsoft() -> ScanResult {
     match find_kingsoft_scan_ui() {
@@ -163,8 +169,8 @@ fn scan_file_kingsoft() -> ScanResult {
             let _ = Command::new(exe).spawn();
             ScanResult {
                 outcome: ScanOutcome::ManualScanRequired,
-                message_en: "KINGSOFT Internet Security does not provide a documented automatic command-line scan interface. Its scan window has been opened — please run the scan manually and confirm the result yourself.".to_string(),
-                message_ja: "キングソフト インターネットセキュリティには、文書化された自動コマンドラインスキャン機能がありません。スキャン画面を開きましたので、手動でスキャンを実行し、結果はご自身でご確認ください。".to_string(),
+                message_en: "KINGSOFT Internet Security does not provide a documented automatic command-line scan interface. A scan trigger was sent, but it may not open a visible window on its own — please open KINGSOFT from its system tray icon and run the scan manually, then confirm the result yourself.".to_string(),
+                message_ja: "キングソフト インターネットセキュリティには、文書化された自動コマンドラインスキャン機能がありません。スキャンの起動を試みましたが、単独では画面が表示されない場合があります。タスクトレイのキングソフトアイコンから手動でスキャンを実行し、結果はご自身でご確認ください。".to_string(),
             }
         }
         None => ScanResult {

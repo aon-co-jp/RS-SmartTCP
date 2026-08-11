@@ -61,6 +61,25 @@ fn update_virus_definitions() -> DefinitionsUpdateOutcome {
     }
 }
 
+/// Windowsのタスクスケジューラへ「ログオン時+以後1時間おき」に
+/// 本メンテナンスを起動する`schtasks`コマンド文字列を組み立てる。
+///
+/// **このクレート自身はこのコマンドを実行しない**(前述の「本クレートは
+/// スケジューリングを行わない」方針通り)——呼び出し側アプリが、ユーザー
+/// の同意を得た上で実際に実行するかどうかを決める。`exe_path`には、
+/// 実行時に`run_maintenance()`相当の処理を行う自アプリ自身の実行ファイル
+/// パスを渡す想定(ダウンロードされた任意のファイルを指すものではない)。
+pub fn windows_scheduled_task_command(task_name: &str, exe_path: &str) -> String {
+    format!(
+        "schtasks /Create /TN \"{task_name}\" /TR \"\\\"{exe_path}\\\"\" /SC HOURLY /MO 1 /RL HIGHEST /F"
+    )
+}
+
+/// 上記で登録したタスクを削除するコマンド文字列(こちらも実行はしない)。
+pub fn windows_scheduled_task_delete_command(task_name: &str) -> String {
+    format!("schtasks /Delete /TN \"{task_name}\" /F")
+}
+
 /// PC起動時・定期実行(呼び出し側のスケジューラ/タスク管理から呼ばれる
 /// 想定)のメンテナンス一式: (1) セキュリティソフトの登録確認、
 /// (2) ClamAVのウイルス定義更新。ファイルの実行は一切行わない。
@@ -108,5 +127,16 @@ mod tests {
         assert_eq!(report.definitions_update, DefinitionsUpdateOutcome::DefinitionsUpdateUnavailable);
         assert!(!report.summary_en.is_empty());
         assert!(!report.summary_ja.is_empty());
+    }
+
+    #[test]
+    fn windows_scheduled_task_command_never_executes_only_builds_a_string() {
+        let cmd = windows_scheduled_task_command("RS-SmartTCP-Maintenance", r"C:\Program Files\MyApp\myapp.exe");
+        assert!(cmd.starts_with("schtasks /Create"));
+        assert!(cmd.contains("RS-SmartTCP-Maintenance"));
+        assert!(cmd.contains(r"myapp.exe"));
+
+        let delete_cmd = windows_scheduled_task_delete_command("RS-SmartTCP-Maintenance");
+        assert!(delete_cmd.starts_with("schtasks /Delete"));
     }
 }
