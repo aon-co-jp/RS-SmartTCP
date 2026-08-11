@@ -33,6 +33,56 @@ path依存する」パターンの一員。
 
 ## HANDOFF
 
+- **2026-08-11(続き12) 4層暗号化通信(`secure_channel.rs`)+RAID-Z2/Z3
+  パリティ高速化ブリッジ(`raid_bridge.rs`)を新設(ユーザー指示「通信と
+  DATABASEの4層4重暗号化セキュリティ通信とDATABSEとRAID6のZ2やZ3対応で
+  パリティチェックの高速化やnVME SSD」+「CPU+NPU+GPU…open-directxと
+  open-cudaによるWindows/Mac/Linux/nVIDIA/AMD/Intel互換のハードウェア
+  アクセラレーター対応」への対応)**:
+  1. **循環依存の発見**: `open-web-server-wire`(4層防御通信の既存実装)を
+     path依存で再利用しようとしたところ、**`open-web-server-wire`が既に
+     `rs-smarttcp`へpath依存しているため循環依存になりビルド不可**と
+     判明(`cargo add`の`cyclic package dependency`エラーで確認)。その
+     ため`secure_channel.rs`は、同じ設計(ChaCha20-Poly1305 AEAD+
+     seq/timestampのAAD結合によるリプレイ対策)を同じ`chacha20poly1305`
+     クレートで独立実装した——コード複製ではなく、依存方向の制約による
+     並行実装であることをモジュールdocに明記。
+  2. **`raid_bridge.rs`**: `open-raid-z`(`open_raid_z_core::vdev::
+     RaidZVdev`)+`zfs_accel_hlsl`(D3D12/DirectML〈Windows〉・Vulkan
+     Compute〈Linux/macOS/Android〉によるGPU/NPU自動検出、CPU
+     フォールバック付き)をpath依存でそのまま再利用する薄いブリッジ
+     (`dream-os-raid-bridge`と同一方針)。Z2(パリティ2本)・Z3(パリティ
+     3本)双方をサポート。
+  3. **NVMe SSDについての正直な開示**: `open_raid_z_core::block_device::
+     BlockDevice`の実装は現時点で`FileBackedDevice`(通常ファイルへの
+     ループバック)のみであり、実NVMeデバイスへの直接I/O実装は
+     `open-raid-z`側にもこのブリッジ側にも存在しない
+     (`dream-os-raid-bridge`の既存の開示と同じ状況を再確認)。
+     「NVMe対応」を名乗る実装はまだ無く、ループバック検証に留まる。
+  4. **暗号処理へのGPU/NPUアクセラレータ追加は見送り(正直な判断根拠)**:
+     ユーザー指示にあった「暗号…の高速化」について検討したが、
+     このエコシステムの既存の実測結果(`aruaru-llm`/`dream-os`の
+     複数のHANDOFFで繰り返し確認: GT730のような実機では、1回あたりの
+     計算量が小さい処理をGPUディスパッチすると、コマンドバッファ
+     記録・`vkQueueSubmit`・フェンス同期の固定オーバーヘッドがCPU実行
+     より遅くなる)を踏まえ、ChaCha20-Poly1305(CPU上のSIMD実装で
+     既に数GB/s級)のような軽量・逐次的な暗号処理をGPU化することは
+     見せかけの高速化になりかねないと判断し、実装しなかった。
+     一方、**RAID-Z2/Z3のパリティ計算(GF(2^8)行列演算、ストライプ単位の
+     まとまった計算量)は`zfs_accel_hlsl`が既に実際にGPU/NPU
+     アクセラレーションを提供しており、本ブリッジはそれをそのまま
+     活用する**——「高速化に意味がある処理とない処理を区別する」という
+     このエコシステムの一貫した判断基準に従った。
+  5. **検証**: `cargo test --lib`**72件全green**(既存66件+
+     `secure_channel`4件+`raid_bridge`2件)。Z2は1台のディスク破損から、
+     Z3は2台の同時破損から、いずれも実際に自己修復できることを
+     ファイルI/Oで確認。
+  - 次にすべきこと: (1) 実NVMeデバイスへの`BlockDevice`実装
+    (open-raid-z側の変更が必要)、(2) `secure_channel`を実際の
+    ソケット通信・`redundant_transmission`と組み合わせた実配線、
+    (3) GPU/NPUアクセラレータが実際に選択されたか(CPUフォールバック
+    かどうか)をAPI/GUIから確認できる診断エンドポイントの追加。
+
 - **2026-08-11(続き11) 「4層4重の通信」+「RS-SmartTCP自体のACID互換
   トランザクション」を新規実装(ユーザー指示「4層4重の通信とACID互換、
   ZFS互換のopen-raid-zとaruaru-db/PostgreSQL/open-web-server/RPoem/

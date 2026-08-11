@@ -11,4 +11,8 @@ name = "rs_smarttcp"
 path = "src/lib.rs"
 
 [dependencies]
+chacha20poly1305 = "0.11.0"
+open_raid_z_core = { version = "0.0.1", path = "../open-raid-z/open_runo_zfs_source/open_raid_z_core", default-features = false }
+rand = "0.10.2"
 rcgen = { version = "0.14.9", features = ["x509-parser"] }
+zfs_accel_hlsl = { version = "0.0.1", path = "../open-raid-z/open_runo_zfs_source/zfs_accel_hlsl" }
