@@ -2,7 +2,7 @@
 //!
 //! ユーザー指示「機能確認の為のGUI化と、今何がつながっているかの確認
 //! 機能も付けて」+「ルーターと外付けHDDやNASなどに複数LANケーブル
-//! 1本から最大4本＋WiFiも追加可能にして対応して」への対応。標準
+//! 1本から最大10本＋WiFiも追加可能にして対応して」への対応。標準
 //! ライブラリのみ(`std::net`)で実装した最小限のHTTPサーバー——この
 //! クレートの既存方針「外部依存クレート無し」を保つため、RPoem等の
 //! Webフレームワークは意図的に使わない。
@@ -26,7 +26,7 @@ use rs_smarttcp::bandwidth_policy::BandwidthPolicy;
 use rs_smarttcp::multi_path::{DeviceKind, MultiPathManager};
 use rs_smarttcp::network_interfaces;
 use rs_smarttcp::router_features::{RouterFeatures, ROUTER_APP_PLUGINS, SECURITY_ROUTER_PLUGINS};
-use rs_smarttcp::wan_config::WanConfig;
+use rs_smarttcp::multi_wan::MultiWanManager;
 
 fn bind_addr() -> String {
     std::env::var("RS_SMARTTCP_GUI_BIND").unwrap_or_else(|_| "127.0.0.1:7878".to_string())
@@ -36,7 +36,7 @@ struct AppState {
     policy: BandwidthPolicy,
     paths: MultiPathManager,
     router_features: RouterFeatures,
-    wan: WanConfig,
+    wan: MultiWanManager,
 }
 
 fn device_kind_label(kind: DeviceKind) -> &'static str {
@@ -110,26 +110,43 @@ fn render_page(state: &AppState, probe_error: Option<&str>) -> String {
         String::new()
     };
 
-    let wan_summary = state.wan.connection_summary();
-    let wan_auto_checked = if state.wan.is_auto_configure_enabled() { "checked" } else { "" };
-    let ipv6_checked = if state.wan.is_ipv6_enabled() { "checked" } else { "" };
-    let v6_plus_checked = if state.wan.is_v6_plus_enabled() { "checked" } else { "" };
+    let wan_line_count = state.wan.line_count();
+    let wan_lines_html: String = state
+        .wan
+        .line_names()
+        .into_iter()
+        .map(|name| {
+            let summary = state.wan.connection_summary(&name).unwrap_or("?");
+            let auto_checked = if state.wan.is_auto_configure_enabled(&name).unwrap_or(false) { "checked" } else { "" };
+            let ipv6_checked = if state.wan.is_ipv6_enabled(&name).unwrap_or(false) { "checked" } else { "" };
+            let v6_plus_checked = if state.wan.is_v6_plus_enabled(&name).unwrap_or(false) { "checked" } else { "" };
+            let n = html_escape(&name);
+            format!(
+                r#"<div style="border:1px solid #ccc; border-radius:6px; padding:10px; margin-bottom:8px;">
+<strong>{n}</strong> — {summary}
+<form method="post" action="/toggle-wan-auto-configure"><input type="hidden" name="name" value="{n}"><label><input type="checkbox" name="enabled" value="1" {auto_checked} onchange="this.form.submit()"> Auto-configure / 自動設定</label></form>
+<form method="post" action="/toggle-ipv6"><input type="hidden" name="name" value="{n}"><label><input type="checkbox" name="enabled" value="1" {ipv6_checked} onchange="this.form.submit()"> Use IPv6 / IPv6を使用する</label></form>
+<form method="post" action="/toggle-v6-plus"><input type="hidden" name="name" value="{n}"><label><input type="checkbox" name="enabled" value="1" {v6_plus_checked} onchange="this.form.submit()"> v6 Plus (MAP-E) / v6プラス</label></form>
+</div>"#
+            )
+        })
+        .collect();
 
     format!(
         r#"<!doctype html>
 <html><head><meta charset="utf-8"><title>RS-SmartTCP status</title></head>
 <body style="font-family: sans-serif; max-width: 720px; margin: 40px auto;">
 <h1>RS-SmartTCP — Connection status / 接続状況</h1>
-<p>Wired Ethernet connected / 有線LAN接続本数: <strong>{wired}</strong> (max 4 supported / 最大4本まで対応)</p>
-<p>Wi-Fi connected / WiFi接続本数: <strong>{wifi_count}</strong> (multiple adapters supported / 複数枚対応)</p>
-<p>Bluetooth connected / Bluetooth接続本数: <strong>{bt_count}</strong> (multiple adapters supported / 複数対応)</p>
+<p>Wired Ethernet connected / 有線LAN接続本数: <strong>{wired}</strong> (max 10 supported / 最大10本まで対応)</p>
+<p>Wi-Fi connected / WiFi接続本数: <strong>{wifi_count}</strong> (max 10 channels supported / 最大10チャンネルまで対応)</p>
+<p>Bluetooth connected / Bluetooth接続本数: <strong>{bt_count}</strong> (max 10 channels supported / 最大10チャンネルまで対応)</p>
 <table border="1" cellpadding="6" style="border-collapse: collapse;">
 <tr><th>Interface / インターフェース</th><th>Kind / 種別</th><th>Status / 状態</th></tr>
 {rows}
 </table>
 
 <h2>Router / NAS / External HDD paths / 経路一覧</h2>
-<p style="font-size:0.85em; color:#666;">Add your router, NAS, or external HDD's address below to measure and compare its response time (up to 4 wired + Wi-Fi). / 下のフォームからルーター・NAS・外付けHDDのアドレスを追加すると、応答時間を測定・比較できます(有線最大4本+WiFi)。</p>
+<p style="font-size:0.85em; color:#666;">Add your router, NAS, or external HDD's address below to measure and compare its response time (up to 10 wired + Wi-Fi). / 下のフォームからルーター・NAS・外付けHDDのアドレスを追加すると、応答時間を測定・比較できます(有線最大10本+WiFi)。</p>
 <table border="1" cellpadding="6" style="border-collapse: collapse;">
 <tr><th>Name / 名前</th><th>Kind / 種別</th><th>Response time / 応答時間</th></tr>
 {device_rows}
@@ -171,18 +188,14 @@ Fix speed to 10Mbps for streaming (YouTube / U-NEXT / Qobuz etc.) to improve aud
 {security_router_plugins_html}
 <p style="color:#999; font-size: 0.8em;">Honest disclosure: these plugins are pre-built modules shipped with this crate, not arbitrary downloaded/executed third-party code (running unknown code would be a serious security risk for a router/security gateway). / 正直な開示: これらのプラグインはこのクレートにあらかじめ組み込まれた既知のモジュールであり、任意の外部コードをダウンロード・実行するものではありません(ルーター/セキュリティゲートウェイの文脈で未知のコードを実行することは重大なセキュリティリスクのため)。</p>
 
-<h2>WAN connection / WAN接続設定</h2>
-<p>Current mode / 現在の方式: <strong>{wan_summary}</strong></p>
-<form method="post" action="/toggle-wan-auto-configure">
-<label><input type="checkbox" name="enabled" value="1" {wan_auto_checked} onchange="this.form.submit()"> Auto-configure WAN connection / WANからの接続を自動設定</label>
+<h2>WAN connections / WAN回線一覧(最大10本)</h2>
+<p>WAN lines registered / 登録済みWAN回線数: <strong>{wan_line_count}</strong> / 10</p>
+{wan_lines_html}
+<form method="post" action="/add-wan-line" style="display:flex; gap:8px; align-items:center;">
+<input type="text" name="name" placeholder="WAN line name / WAN回線名 (e.g. WAN1 Fiber A)" required>
+<button type="submit">Add WAN line / WAN回線を追加</button>
 </form>
-<form method="post" action="/toggle-ipv6">
-<label><input type="checkbox" name="enabled" value="1" {ipv6_checked} onchange="this.form.submit()"> Use IPv6 / IPv6を使用する</label>
-</form>
-<form method="post" action="/toggle-v6-plus">
-<label><input type="checkbox" name="enabled" value="1" {v6_plus_checked} onchange="this.form.submit()"> IPv6 v6 Plus (MAP-E) / IPv6 v6プラス(MAP-E)</label>
-</form>
-<p style="font-size:0.85em; color:#666;">You can use IPv6 without v6 Plus (e.g. native/PPPoE IPv6) by leaving the v6 Plus box unchecked. / v6プラスのチェックを外したままでも、IPv6自体(ネイティブ/PPPoE方式等)は利用できます。</p>
+<p style="font-size:0.85em; color:#666;">You can use IPv6 without v6 Plus (e.g. native/PPPoE IPv6) by leaving the v6 Plus box unchecked, per WAN line. / v6プラスのチェックを外したままでも、IPv6自体(ネイティブ/PPPoE方式等)は回線ごとに利用できます。</p>
 <p style="color:#999; font-size: 0.8em;">Honest disclosure: these are configuration-intent flags only — actual WAN negotiation (DHCPv6-PD, MAP-E parameter retrieval, tunnel setup) is performed by your OS/router firmware, not by this library. / 正直な開示: これらは設定意図を表すフラグに過ぎません——実際のWAN接続確立(DHCPv6-PD交渉・MAP-Eパラメータ取得・トンネル設定)はOS/ルーター機器側が行い、このライブラリ自体は行いません。</p>
 <p style="color:#666; font-size: 0.9em;">Other traffic (regular websites, SFTP, Claude and other AI/chat tools) always runs at full speed. /
 それ以外の通信(通常のWebサイト・SFTP・ClaudeなどのAI・チャットツール等)は常に最高速度で動作します。</p>
@@ -311,18 +324,37 @@ fn handle(mut stream: TcpStream, state: &AppState) {
         let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
         return;
     }
+    if first_line.starts_with("POST /add-wan-line") {
+        let form = parse_form(body_text);
+        if let Some(name) = form.get("name") {
+            if !name.is_empty() {
+                let _ = state.wan.register_line(name);
+            }
+        }
+        let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
+        return;
+    }
     if first_line.starts_with("POST /toggle-wan-auto-configure") {
-        state.wan.set_auto_configure_enabled(body_text.contains("enabled=1"));
+        let form = parse_form(body_text);
+        if let Some(name) = form.get("name") {
+            state.wan.set_auto_configure_enabled(name, body_text.contains("enabled=1"));
+        }
         let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
         return;
     }
     if first_line.starts_with("POST /toggle-ipv6") {
-        state.wan.set_ipv6_enabled(body_text.contains("enabled=1"));
+        let form = parse_form(body_text);
+        if let Some(name) = form.get("name") {
+            state.wan.set_ipv6_enabled(name, body_text.contains("enabled=1"));
+        }
         let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
         return;
     }
     if first_line.starts_with("POST /toggle-v6-plus") {
-        state.wan.set_v6_plus_enabled(body_text.contains("enabled=1"));
+        let form = parse_form(body_text);
+        if let Some(name) = form.get("name") {
+            state.wan.set_v6_plus_enabled(name, body_text.contains("enabled=1"));
+        }
         let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
         return;
     }
@@ -356,11 +388,13 @@ fn main() {
     println!("RS-SmartTCP status GUI listening on http://{addr}/");
 
     let report = network_interfaces::detect();
+    let wan = MultiWanManager::new();
+    let _ = wan.register_line("WAN1"); // 既定で1本、最大10本まで追加可能。
     let state = AppState {
         policy: BandwidthPolicy::new(),
         paths: MultiPathManager::from_detected_interfaces(&report),
         router_features: RouterFeatures::new(),
-        wan: WanConfig::new(),
+        wan,
     };
     let state = Mutex::new(state);
 

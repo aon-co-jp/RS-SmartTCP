@@ -1,8 +1,8 @@
-//! 複数経路(有線LAN最大4本+WiFi)の中から最良経路を選ぶ+自動フェイル
+//! 複数経路(有線LAN最大10本+WiFi)の中から最良経路を選ぶ+自動フェイル
 //! オーバー(2026-08-11新設)。
 //!
 //! ユーザー指示「LANコネクターが仮にUSBであろうと、PCIE経由であろうと
-//! マザーボード経由でもLANケーブルは最大4本＋Wifi同時接続で通信の
+//! マザーボード経由でもLANケーブルは最大10本＋Wifi同時接続で通信の
 //! 高速化と安定化機能を搭載して」への対応。
 //!
 //! ## 正直な開示(最重要)
@@ -18,7 +18,7 @@
 //! 本モジュールが実際に提供するのは以下の2点であり、それぞれ
 //! 「高速化」と「安定化」という元の要望に対応する、誠実な範囲の実装:
 //!
-//! 1. **最良経路選択(高速化)**: 複数の経路(有線LAN最大4本+WiFi)
+//! 1. **最良経路選択(高速化)**: 複数の経路(有線LAN最大10本+WiFi)
 //!    それぞれのRTT/ジッター([`crate::NetworkQualityMonitor`])を
 //!    個別に追跡し、新しい接続を張る際に最もRTTが低い経路を選ぶ。
 //! 2. **自動フェイルオーバー(安定化)**: 選択中の経路が劣化・切断
@@ -30,12 +30,21 @@ use std::sync::Mutex;
 use crate::network_interfaces::{InterfaceKind, NetworkInterfaceReport};
 use crate::NetworkQualityMonitor;
 
-/// 同時に扱う経路数の目安(有線LAN最大4本+WiFi1本、ユーザー指示の
-/// 数値をそのまま採用)。強制する上限ではなく、ドキュメント上の目安。
-pub const MAX_WIRED_PATHS: usize = 4;
+/// 同時に扱う経路数の目安(有線LAN最大10本、ユーザー指示の数値を
+/// そのまま採用)。強制する上限ではなく、ドキュメント上の目安。
+pub const MAX_WIRED_PATHS: usize = 10;
+
+/// 同時に扱うWiFiチャンネル(回線)数の上限(2026-08-11追加、ユーザー
+/// 指示「複数WiFiは最大10チャンネル(回線)…同時接続可能にして」)。
+pub const MAX_WIFI_PATHS: usize = 10;
+
+/// 同時に扱うBluetoothチャンネル(回線)数の上限(2026-08-11追加、
+/// ユーザー指示「複数ブルーツースは最大10チャンネル(回線)…同時接続
+/// 可能にして」)。
+pub const MAX_BLUETOOTH_PATHS: usize = 10;
 
 /// 経路の先につながる機器の種類(2026-08-11追加、ユーザー指示
-/// 「ルーターと外付けHDDやNASなどに複数LANケーブル1本から最大4本＋
+/// 「ルーターと外付けHDDやNASなどに複数LANケーブル1本から最大10本＋
 /// WiFiも追加可能にして対応して」+「PC、タブレット、スマホ、TV、
 /// ゲームマシンなどとルーターと外付けHDDやNASなどに…対応して」への
 /// 対応)。GUI/ログ上で意味のあるラベルを表示するための分類であり、
@@ -83,6 +92,8 @@ impl MultiPathManager {
     pub fn from_detected_interfaces(report: &NetworkInterfaceReport) -> Self {
         let mgr = Self::new();
         let mut wired_registered = 0usize;
+        let mut wifi_registered = 0usize;
+        let mut bluetooth_registered = 0usize;
         for iface in &report.interfaces {
             if !iface.connected {
                 continue;
@@ -92,14 +103,18 @@ impl MultiPathManager {
                     mgr.register_device_path(&iface.name, DeviceKind::Other);
                     wired_registered += 1;
                 }
-                // WiFi・Bluetoothは複数枚挿さっている環境を想定し、
-                // 有線のような本数上限を設けない(ユーザー指示「複数LAN＋
-                // 複数WiFi＋複数ブルーツゥース対応」、2026-08-11)。
-                InterfaceKind::Wifi => {
+                // WiFi・Bluetoothも、それぞれ独立した上限
+                // (MAX_WIFI_PATHS/MAX_BLUETOOTH_PATHS=10)まで登録する
+                // (2026-08-11、ユーザー指示「複数WiFiは最大10チャンネル
+                // …複数ブルーツースは最大10チャンネル…同時接続可能に
+                // して」)。
+                InterfaceKind::Wifi if wifi_registered < MAX_WIFI_PATHS => {
                     mgr.register_device_path(&iface.name, DeviceKind::Wifi);
+                    wifi_registered += 1;
                 }
-                InterfaceKind::Bluetooth => {
+                InterfaceKind::Bluetooth if bluetooth_registered < MAX_BLUETOOTH_PATHS => {
                     mgr.register_device_path(&iface.name, DeviceKind::Bluetooth);
+                    bluetooth_registered += 1;
                 }
                 _ => {}
             }
@@ -252,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn from_detected_interfaces_registers_multiple_wifi_and_bluetooth_without_a_cap() {
+    fn from_detected_interfaces_registers_multiple_wifi_and_bluetooth() {
         use crate::network_interfaces::{InterfaceKind, NetworkInterface, NetworkInterfaceReport};
 
         let report = NetworkInterfaceReport {
@@ -264,21 +279,40 @@ mod tests {
             ],
         };
         let mgr = MultiPathManager::from_detected_interfaces(&report);
-        assert_eq!(mgr.path_count(), 4, "no cap on WiFi/Bluetooth registrations, unlike wired");
+        assert_eq!(mgr.path_count(), 4);
         let paths = mgr.registered_paths();
         assert_eq!(paths.iter().filter(|(_, k, _)| *k == DeviceKind::Wifi).count(), 2);
         assert_eq!(paths.iter().filter(|(_, k, _)| *k == DeviceKind::Bluetooth).count(), 2);
     }
 
     #[test]
+    fn from_detected_interfaces_caps_wifi_and_bluetooth_at_ten_channels_each() {
+        use crate::network_interfaces::{InterfaceKind, NetworkInterface, NetworkInterfaceReport};
+
+        let mut interfaces: Vec<NetworkInterface> = (0..(MAX_WIFI_PATHS + 3))
+            .map(|i| NetworkInterface { name: format!("wifi{i}"), kind: InterfaceKind::Wifi, connected: true })
+            .collect();
+        interfaces.extend((0..(MAX_BLUETOOTH_PATHS + 3)).map(|i| NetworkInterface {
+            name: format!("bt{i}"),
+            kind: InterfaceKind::Bluetooth,
+            connected: true,
+        }));
+        let report = NetworkInterfaceReport { interfaces };
+        let mgr = MultiPathManager::from_detected_interfaces(&report);
+        let paths = mgr.registered_paths();
+        assert_eq!(paths.iter().filter(|(_, k, _)| *k == DeviceKind::Wifi).count(), MAX_WIFI_PATHS, "must cap WiFi at 10 channels");
+        assert_eq!(paths.iter().filter(|(_, k, _)| *k == DeviceKind::Bluetooth).count(), MAX_BLUETOOTH_PATHS, "must cap Bluetooth at 10 channels");
+    }
+
+    #[test]
     fn from_detected_interfaces_caps_wired_registrations_at_max_wired_paths() {
         use crate::network_interfaces::{InterfaceKind, NetworkInterface, NetworkInterfaceReport};
 
-        let interfaces = (0..6)
+        let interfaces = (0..(MAX_WIRED_PATHS + 2))
             .map(|i| NetworkInterface { name: format!("eth{i}"), kind: InterfaceKind::Ethernet, connected: true })
             .collect();
         let report = NetworkInterfaceReport { interfaces };
         let mgr = MultiPathManager::from_detected_interfaces(&report);
-        assert_eq!(mgr.path_count(), MAX_WIRED_PATHS, "must cap at the documented max of 4 wired paths");
+        assert_eq!(mgr.path_count(), MAX_WIRED_PATHS, "must cap at the documented max of 10 wired paths");
     }
 }

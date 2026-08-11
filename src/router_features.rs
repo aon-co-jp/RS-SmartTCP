@@ -41,10 +41,33 @@ pub const ROUTER_APP_PLUGINS: &[PluginInfo] = &[
 /// 「セキュリティルーター機能」チェックを入れた場合に選べる、既知の
 /// 機能モジュール一覧(誇張しない範囲の代表例、いずれも既存の
 /// シグネチャ/ルールベース方式を想定——高度なAI検知は別途実装が必要)。
+///
+/// **正直な開示(最重要、`tls_deep_inspection`/`ai_intrusion_detection`
+/// について)**: この2件は、ユーザー指示「open-directx + open-cudaで
+/// ハードウェアがあればハードウェアアクセラレーター対応として…必須に
+/// しよう」を受けて一覧に追加した項目だが、**設定フラグ(有効/無効の
+/// トグル)としてのみ存在し、実際のTLS復号・再暗号化やGPU/NPU推論に
+/// よる侵入検知は未実装**である。TLSディープパケットインスペクションは
+/// 実質的にユーザー自身のHTTPS通信を復号するMITM(中間者)機能であり、
+/// 実装には(a) 信頼された証明書チェーンの発行・配布、(b) 復号した
+/// 通信内容の安全な取り扱い、(c) `open-cuda`/`open-directx`との実際の
+/// GPU/NPU連携配線、という重量級かつセキュリティ上慎重を要する設計が
+/// 必要で、このセッションの範囲では行わない——「有効化ボタンだけ用意
+/// して中身が空」という誇張を避けるため、この制約をコード上に明記する。
 pub const SECURITY_ROUTER_PLUGINS: &[PluginInfo] = &[
     PluginInfo { id: "ad_tracker_blocking", label_en: "Ad & tracker blocking", label_ja: "広告・トラッカーブロック" },
     PluginInfo { id: "dns_filtering", label_en: "DNS filtering", label_ja: "DNSフィルタリング" },
     PluginInfo { id: "parental_controls", label_en: "Parental controls", label_ja: "ペアレンタルコントロール" },
+    PluginInfo {
+        id: "tls_deep_inspection",
+        label_en: "TLS deep packet inspection (GPU/NPU accelerated via open-cuda/open-directx when available) — config flag only, not yet implemented",
+        label_ja: "TLSディープパケットインスペクション(open-cuda/open-directx経由のGPU/NPUアクセラレーター対応、対応ハードウェアがあれば) — 設定フラグのみ、未実装",
+    },
+    PluginInfo {
+        id: "ai_intrusion_detection",
+        label_en: "AI-based intrusion detection (GPU/NPU accelerated via open-cuda/open-directx when available) — config flag only, not yet implemented",
+        label_ja: "AIベースの侵入検知(open-cuda/open-directx経由のGPU/NPUアクセラレーター対応、対応ハードウェアがあれば) — 設定フラグのみ、未実装",
+    },
 ];
 
 pub struct RouterFeatures {
