@@ -47,6 +47,34 @@ impl AdaptivePolicy {
 }
 ```
 
+## 外部クレート非依存でOS標準ツールを呼び出すパターン(`src/
+network_interfaces.rs`・`src/download_protection.rs`・
+`src/usb_protection.rs`、2026-08-11新設)
+
+「ネットワークアダプタ一覧・ウイルススキャン・リムーバブルドライブ
+検出」等、OS標準機能に依存する処理を、専用のRustクレート(`windows`
+クレート等)を追加せずに`std::process::Command`でOS標準コマンド
+(PowerShellの`Get-NetAdapter`・`Get-CimInstance`、ウイルス対策ソフトの
+CLIスキャナー等)を呼び出しテキスト出力を解析する設計。
+
+実際に踏んだ落とし穴と対処:
+1. **ロケール依存の文字化け**: `ipconfig`の出力はシステムのANSI
+   コードページ(日本語版なら Shift-JIS)で出力されるため、そのまま
+   UTF-8として解釈すると文字化けする。`chcp 65001`での一時切替でも
+   完全には直らないことがあった——**可能な限り、ロケールに依存しない
+   構造化データ(PowerShellの`Get-NetAdapter`が返す`PhysicalMediaType`
+   のような英数字の技術定数)を使う設計に倒す方が根本的に安全**
+   (`network_interfaces.rs`の`ipconfig`→`Get-NetAdapter`移行の経緯
+   参照)。
+2. **特定ベンダー依存を避ける**: Windows Defenderの`MpCmdRun.exe`は、
+   別のセキュリティ製品が導入されている環境ではオンデマンドスキャン
+   機能自体が無効化されていることがある(実機で確認)。OS標準機能
+   よりも、クロスプラットフォームで動作する独立した無料ツール
+   (ClamAV等)を使う方が環境依存のリスクを減らせる。
+3. **見つからない・無効な場合は正直に`Unavailable`を返す**: 「動く
+   ふりをする」フォールバックは絶対に避け、呼び出し側が状態を正しく
+   判別できる専用のenumバリアントを用意する(`ScannerUnavailable`等)。
+
 ## 未実装拡張点を安全にフォールバックさせるパターン(移植元:
 `open-web-server-wire::accel`、本リポジトリと同日に新設)
 
