@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 use rs_smarttcp::bandwidth_policy::BandwidthPolicy;
 use rs_smarttcp::multi_path::{DeviceKind, MultiPathManager};
 use rs_smarttcp::network_interfaces;
+use rs_smarttcp::router_features::{RouterFeatures, ROUTER_APP_PLUGINS, SECURITY_ROUTER_PLUGINS};
+use rs_smarttcp::wan_config::WanConfig;
 
 fn bind_addr() -> String {
     std::env::var("RS_SMARTTCP_GUI_BIND").unwrap_or_else(|_| "127.0.0.1:7878".to_string())
@@ -33,6 +35,8 @@ fn bind_addr() -> String {
 struct AppState {
     policy: BandwidthPolicy,
     paths: MultiPathManager,
+    router_features: RouterFeatures,
+    wan: WanConfig,
 }
 
 fn device_kind_label(kind: DeviceKind) -> &'static str {
@@ -92,6 +96,25 @@ fn render_page(state: &AppState, probe_error: Option<&str>) -> String {
         .map(|e| format!("<p style=\"color:#c33;\">Probe failed / 疎通確認に失敗しました: {}</p>", html_escape(e)))
         .unwrap_or_default();
 
+    let router_app_checked = if state.router_features.is_router_app_enabled() { "checked" } else { "" };
+    let security_router_checked = if state.router_features.is_security_router_enabled() { "checked" } else { "" };
+
+    let router_app_plugins_html = if state.router_features.is_router_app_enabled() {
+        render_plugin_list(&state.router_features, ROUTER_APP_PLUGINS)
+    } else {
+        String::new()
+    };
+    let security_router_plugins_html = if state.router_features.is_security_router_enabled() {
+        render_plugin_list(&state.router_features, SECURITY_ROUTER_PLUGINS)
+    } else {
+        String::new()
+    };
+
+    let wan_summary = state.wan.connection_summary();
+    let wan_auto_checked = if state.wan.is_auto_configure_enabled() { "checked" } else { "" };
+    let ipv6_checked = if state.wan.is_ipv6_enabled() { "checked" } else { "" };
+    let v6_plus_checked = if state.wan.is_v6_plus_enabled() { "checked" } else { "" };
+
     format!(
         r#"<!doctype html>
 <html><head><meta charset="utf-8"><title>RS-SmartTCP status</title></head>
@@ -136,11 +159,55 @@ Fix speed to 10Mbps for streaming (YouTube / U-NEXT / Qobuz etc.) to improve aud
 音質向上のため、動画・音楽ストリーミング(YouTube・U-NEXT・Qobuz等)利用時の通信速度を10Mbpsに固定しますか？
 </label>
 </form>
+
+<h2>Router / security features / ルーター・セキュリティ機能</h2>
+<form method="post" action="/toggle-router-app">
+<label><input type="checkbox" name="enabled" value="1" {router_app_checked} onchange="this.form.submit()"> Router app function / ルーターアプリ機能</label>
+</form>
+{router_app_plugins_html}
+<form method="post" action="/toggle-security-router">
+<label><input type="checkbox" name="enabled" value="1" {security_router_checked} onchange="this.form.submit()"> Security router function / セキュリティルーター機能</label>
+</form>
+{security_router_plugins_html}
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: these plugins are pre-built modules shipped with this crate, not arbitrary downloaded/executed third-party code (running unknown code would be a serious security risk for a router/security gateway). / 正直な開示: これらのプラグインはこのクレートにあらかじめ組み込まれた既知のモジュールであり、任意の外部コードをダウンロード・実行するものではありません(ルーター/セキュリティゲートウェイの文脈で未知のコードを実行することは重大なセキュリティリスクのため)。</p>
+
+<h2>WAN connection / WAN接続設定</h2>
+<p>Current mode / 現在の方式: <strong>{wan_summary}</strong></p>
+<form method="post" action="/toggle-wan-auto-configure">
+<label><input type="checkbox" name="enabled" value="1" {wan_auto_checked} onchange="this.form.submit()"> Auto-configure WAN connection / WANからの接続を自動設定</label>
+</form>
+<form method="post" action="/toggle-ipv6">
+<label><input type="checkbox" name="enabled" value="1" {ipv6_checked} onchange="this.form.submit()"> Use IPv6 / IPv6を使用する</label>
+</form>
+<form method="post" action="/toggle-v6-plus">
+<label><input type="checkbox" name="enabled" value="1" {v6_plus_checked} onchange="this.form.submit()"> IPv6 v6 Plus (MAP-E) / IPv6 v6プラス(MAP-E)</label>
+</form>
+<p style="font-size:0.85em; color:#666;">You can use IPv6 without v6 Plus (e.g. native/PPPoE IPv6) by leaving the v6 Plus box unchecked. / v6プラスのチェックを外したままでも、IPv6自体(ネイティブ/PPPoE方式等)は利用できます。</p>
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: these are configuration-intent flags only — actual WAN negotiation (DHCPv6-PD, MAP-E parameter retrieval, tunnel setup) is performed by your OS/router firmware, not by this library. / 正直な開示: これらは設定意図を表すフラグに過ぎません——実際のWAN接続確立(DHCPv6-PD交渉・MAP-Eパラメータ取得・トンネル設定)はOS/ルーター機器側が行い、このライブラリ自体は行いません。</p>
 <p style="color:#666; font-size: 0.9em;">Other traffic (regular websites, SFTP, Claude and other AI/chat tools) always runs at full speed. /
 それ以外の通信(通常のWebサイト・SFTP・ClaudeなどのAI・チャットツール等)は常に最高速度で動作します。</p>
 <p style="color:#999; font-size: 0.8em;">Honest disclosure: this does not sum the bandwidth of multiple links into one faster connection (true link aggregation requires OS/NIC teaming support). It picks the best-performing path and fails over automatically. Response time is measured via TCP connect time, not ICMP ping. / 正直な開示: 複数回線の速度を合算する機能ではありません(本物のリンクアグリゲーションにはOS/NICのチーミング機能が必要です)。最良経路の選択と自動フェイルオーバーを行います。応答時間はICMP pingではなくTCP接続確立時間で測定しています。</p>
 </body></html>"#
     )
+}
+
+fn render_plugin_list(features: &RouterFeatures, plugins: &[rs_smarttcp::router_features::PluginInfo]) -> String {
+    // ストリーミング固定チェックボックスと同じパターン(1チェックボックス
+    // =1フォーム)にする——複数チェックボックスを1フォームにまとめると、
+    // チェックを外した瞬間にどのプラグインを外したのか(未チェックの
+    // <input>はPOSTボディに含まれない仕様のため)判別できなくなる問題を
+    // 避けるため。
+    let items: String = plugins
+        .iter()
+        .map(|p| {
+            let checked = if features.is_plugin_installed(p.id) { "checked" } else { "" };
+            format!(
+                "<li><form method=\"post\" action=\"/toggle-plugin\" style=\"display:inline;\"><input type=\"hidden\" name=\"id\" value=\"{}\"><label><input type=\"checkbox\" name=\"enabled\" value=\"1\" {} onchange=\"this.form.submit()\"> {} / {}</label></form></li>",
+                p.id, checked, p.label_en, p.label_ja
+            )
+        })
+        .collect();
+    format!("<ul style=\"list-style:none; padding-left:0;\">{items}</ul>")
 }
 
 fn html_escape(s: &str) -> String {
@@ -221,6 +288,44 @@ fn handle(mut stream: TcpStream, state: &AppState) {
         let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
         return;
     }
+    if first_line.starts_with("POST /toggle-router-app") {
+        state.router_features.set_router_app_enabled(body_text.contains("enabled=1"));
+        let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
+        return;
+    }
+    if first_line.starts_with("POST /toggle-security-router") {
+        state.router_features.set_security_router_enabled(body_text.contains("enabled=1"));
+        let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
+        return;
+    }
+    if first_line.starts_with("POST /toggle-plugin") {
+        let form = parse_form(body_text);
+        if let Some(id) = form.get("id") {
+            let enabled = body_text.contains("enabled=1");
+            if enabled {
+                let _ = state.router_features.install_plugin(id);
+            } else {
+                state.router_features.uninstall_plugin(id);
+            }
+        }
+        let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
+        return;
+    }
+    if first_line.starts_with("POST /toggle-wan-auto-configure") {
+        state.wan.set_auto_configure_enabled(body_text.contains("enabled=1"));
+        let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
+        return;
+    }
+    if first_line.starts_with("POST /toggle-ipv6") {
+        state.wan.set_ipv6_enabled(body_text.contains("enabled=1"));
+        let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
+        return;
+    }
+    if first_line.starts_with("POST /toggle-v6-plus") {
+        state.wan.set_v6_plus_enabled(body_text.contains("enabled=1"));
+        let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
+        return;
+    }
 
     let mut probe_error = None;
     if first_line.starts_with("POST /probe") {
@@ -251,7 +356,12 @@ fn main() {
     println!("RS-SmartTCP status GUI listening on http://{addr}/");
 
     let report = network_interfaces::detect();
-    let state = AppState { policy: BandwidthPolicy::new(), paths: MultiPathManager::from_detected_interfaces(&report) };
+    let state = AppState {
+        policy: BandwidthPolicy::new(),
+        paths: MultiPathManager::from_detected_interfaces(&report),
+        router_features: RouterFeatures::new(),
+        wan: WanConfig::new(),
+    };
     let state = Mutex::new(state);
 
     for stream in listener.incoming() {

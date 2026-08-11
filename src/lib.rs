@@ -65,6 +65,8 @@ use std::time::Duration;
 pub mod bandwidth_policy;
 pub mod multi_path;
 pub mod network_interfaces;
+pub mod router_features;
+pub mod wan_config;
 
 pub use bandwidth_policy::{BandwidthPolicy, TrafficPurpose};
 pub use multi_path::MultiPathManager;
