@@ -63,10 +63,12 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 pub mod bandwidth_policy;
+pub mod download_protection;
 pub mod multi_path;
 pub mod multi_wan;
 pub mod network_interfaces;
 pub mod router_features;
+pub mod usb_protection;
 pub mod wan_config;
 
 pub use bandwidth_policy::{BandwidthPolicy, TrafficPurpose};

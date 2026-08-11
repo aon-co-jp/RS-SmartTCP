@@ -23,10 +23,12 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use rs_smarttcp::bandwidth_policy::BandwidthPolicy;
+use rs_smarttcp::download_protection;
 use rs_smarttcp::multi_path::{DeviceKind, MultiPathManager};
+use rs_smarttcp::multi_wan::MultiWanManager;
 use rs_smarttcp::network_interfaces;
 use rs_smarttcp::router_features::{RouterFeatures, ROUTER_APP_PLUGINS, SECURITY_ROUTER_PLUGINS};
-use rs_smarttcp::multi_wan::MultiWanManager;
+use rs_smarttcp::usb_protection;
 
 fn bind_addr() -> String {
     std::env::var("RS_SMARTTCP_GUI_BIND").unwrap_or_else(|_| "127.0.0.1:7878".to_string())
@@ -55,7 +57,7 @@ fn device_kind_label(kind: DeviceKind) -> &'static str {
     }
 }
 
-fn render_page(state: &AppState, probe_error: Option<&str>) -> String {
+fn render_page(state: &AppState, probe_error: Option<&str>, scan_result: Option<&download_protection::ScanResult>) -> String {
     let report = network_interfaces::detect();
     let wired = report.wired_connected_count();
     let wifi_count = report.wifi_connected_count();
@@ -95,6 +97,48 @@ fn render_page(state: &AppState, probe_error: Option<&str>) -> String {
     let error_html = probe_error
         .map(|e| format!("<p style=\"color:#c33;\">Probe failed / 疎通確認に失敗しました: {}</p>", html_escape(e)))
         .unwrap_or_default();
+
+    let scan_result_html = scan_result
+        .map(|r| {
+            format!(
+                "<div style=\"border:1px solid #ccc; border-radius:6px; padding:10px; margin-top:8px;\"><strong>{:?}</strong><br>{}<br>{}</div>",
+                r.outcome,
+                html_escape(&r.message_en),
+                html_escape(&r.message_ja)
+            )
+        })
+        .unwrap_or_default();
+
+    let usb_drives_html: String = usb_protection::list_removable_drives()
+        .into_iter()
+        .map(|drive| {
+            let d = html_escape(&drive.display().to_string());
+            format!(
+                r#"<li>{d}
+<form method="post" action="/protect-usb-drive" style="display:inline;">
+<input type="hidden" name="drive" value="{d}">
+<select name="backend"><option value="clamav">ClamAV</option><option value="kingsoft">KINGSOFT</option></select>
+<button type="submit">Protect this drive / このドライブを保護</button>
+</form></li>"#
+            )
+        })
+        .collect();
+    let av_recommendation_html = if download_protection::has_registered_antivirus() {
+        String::new()
+    } else {
+        let (en, ja) = download_protection::install_security_software_recommendation();
+        format!(
+            "<div style=\"border:1px solid #c90; background:#fff8e6; border-radius:6px; padding:10px; margin-top:12px;\">⚠️ {}<br>{}</div>",
+            html_escape(&en),
+            html_escape(&ja)
+        )
+    };
+
+    let usb_drives_html = if usb_drives_html.is_empty() {
+        "<p style=\"color:#666; font-size:0.85em;\">No removable drives detected / リムーバブルドライブは検出されていません</p>".to_string()
+    } else {
+        format!("<ul>{usb_drives_html}</ul>")
+    };
 
     let router_app_checked = if state.router_features.is_router_app_enabled() { "checked" } else { "" };
     let security_router_checked = if state.router_features.is_security_router_enabled() { "checked" } else { "" };
@@ -200,6 +244,25 @@ Fix speed to 10Mbps for streaming (YouTube / U-NEXT / Qobuz etc.) to improve aud
 <p style="color:#666; font-size: 0.9em;">Other traffic (regular websites, SFTP, Claude and other AI/chat tools) always runs at full speed. /
 それ以外の通信(通常のWebサイト・SFTP・ClaudeなどのAI・チャットツール等)は常に最高速度で動作します。</p>
 <p style="color:#999; font-size: 0.8em;">Honest disclosure: this does not sum the bandwidth of multiple links into one faster connection (true link aggregation requires OS/NIC teaming support). It picks the best-performing path and fails over automatically. Response time is measured via TCP connect time, not ICMP ping. / 正直な開示: 複数回線の速度を合算する機能ではありません(本物のリンクアグリゲーションにはOS/NICのチーミング機能が必要です)。最良経路の選択と自動フェイルオーバーを行います。応答時間はICMP pingではなくTCP接続確立時間で測定しています。</p>
+
+<h2>Removable drives (USB) / リムーバブルドライブ(USB)</h2>
+<p style="font-size:0.85em; color:#666;">Detected removable drives can be protected: a malicious autorun.inf (if present) is quarantined (renamed, not deleted) and the drive is scanned. / 検出されたリムーバブルドライブを保護できます: 悪意のあるautorun.inf(存在すれば)を隔離(削除ではなくリネーム)し、ドライブをスキャンします。</p>
+{usb_drives_html}
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: Windows itself already disables autorun.inf execution for USB removable drives by default (autorun only applies to optical media) — this feature additionally finds and neutralizes any autorun.inf file that may still be present as a precaution, and does not implement continuous background USB-insertion monitoring (this example checks on request, not automatically the instant a drive is inserted). / 正直な開示: WindowsはUSBリムーバブルドライブのautorun.inf自動実行を既定で無効化済みです(自動実行は光学メディアのみ)——本機能は念のため残存するautorun.infを見つけて無害化するものであり、USB挿入の瞬間を常時バックグラウンド監視する機能ではありません(この例では要求時のみ確認します)。</p>
+
+{av_recommendation_html}
+<h2>Downloaded file protection / ダウンロードファイル保護</h2>
+<p style="font-size:0.85em; color:#666;">Enter a file path to scan it for computer viruses. / ファイルパスを入力してコンピューターウイルスをスキャンします。</p>
+<form method="post" action="/scan-file" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+<input type="text" name="path" placeholder="File path / ファイルパス (e.g. C:\Downloads\file.zip)" style="min-width:260px;" required>
+<select name="backend">
+<option value="clamav">ClamAV (open source / オープンソース)</option>
+<option value="kingsoft">KINGSOFT Internet Security (free / 無料版)</option>
+</select>
+<button type="submit">Scan / スキャン</button>
+</form>
+{scan_result_html}
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: no custom virus-detection engine is implemented here — this calls the real ClamAV (clamscan) or opens KINGSOFT's own scan window. ClamAV automates the result; KINGSOFT does not expose a documented command-line scan API, so its result must be confirmed manually. Archive contents are scanned by the chosen engine itself, not by custom decompression code here. / 正直な開示: 独自のウイルス検出エンジンは実装していません——実際のClamAV(clamscan)を呼び出すか、KINGSOFTのスキャン画面を開きます。ClamAVは結果を自動取得しますが、KINGSOFTは文書化されたコマンドラインAPIが無いため結果は手動確認が必要です。圧縮ファイルの中身はここでの独自解凍ではなく、選択したエンジン自体がスキャンします。</p>
 </body></html>"#
     )
 }
@@ -259,6 +322,13 @@ fn url_decode(s: &str) -> String {
         }
     }
     out
+}
+
+fn backend_from_form_value(v: &str) -> download_protection::ScannerBackend {
+    match v {
+        "kingsoft" => download_protection::ScannerBackend::Kingsoft,
+        _ => download_protection::ScannerBackend::ClamAv,
+    }
 }
 
 fn kind_from_form_value(v: &str) -> DeviceKind {
@@ -374,7 +444,38 @@ fn handle(mut stream: TcpStream, state: &AppState) {
         }
     }
 
-    let body = render_page(state, probe_error.as_deref());
+    let mut scan_result = None;
+    if first_line.starts_with("POST /scan-file") {
+        let form = parse_form(body_text);
+        if let Some(path) = form.get("path") {
+            if !path.is_empty() {
+                let backend = backend_from_form_value(form.get("backend").map(String::as_str).unwrap_or(""));
+                let quarantine = download_protection::default_quarantine_dir();
+                scan_result = Some(download_protection::scan_file(backend, std::path::Path::new(path), &quarantine));
+            }
+        }
+    }
+    if first_line.starts_with("POST /protect-usb-drive") {
+        let form = parse_form(body_text);
+        if let Some(drive) = form.get("drive") {
+            if !drive.is_empty() {
+                let backend = backend_from_form_value(form.get("backend").map(String::as_str).unwrap_or(""));
+                let (autorun, scan) = usb_protection::protect_drive(std::path::Path::new(drive), backend);
+                let mut combined = scan;
+                if autorun.found {
+                    let note = if autorun.quarantined {
+                        " (an autorun.inf file was also found and quarantined / autorun.infファイルも発見・隔離しました)"
+                    } else {
+                        " (an autorun.inf file was found but could not be quarantined / autorun.infファイルが見つかりましたが隔離できませんでした)"
+                    };
+                    combined.message_en.push_str(note);
+                }
+                scan_result = Some(combined);
+            }
+        }
+    }
+
+    let body = render_page(state, probe_error.as_deref(), scan_result.as_ref());
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
