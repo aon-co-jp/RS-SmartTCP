@@ -17,8 +17,10 @@
 //! 簡易的な方法であり、ICMP pingそのものではない(ICMP送信には管理者
 //! 権限やRAWソケットが必要なため、この方が権限昇格無しに動く)。
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -40,6 +42,11 @@ struct AppState {
     paths: MultiPathManager,
     router_features: RouterFeatures,
     wan: MultiWanManager,
+    /// `usb_protection::poll_new_drives`用の「前回確認時点のドライブ
+    /// 集合」。ボタン押下(定期ポーリング)のたびに更新される。
+    usb_seen: Mutex<HashSet<PathBuf>>,
+    /// 直近の「新規USBドライブ確認」結果の表示用テキスト。
+    usb_check_message: Mutex<Option<String>>,
 }
 
 fn device_kind_label(kind: DeviceKind) -> &'static str {
@@ -113,6 +120,14 @@ fn render_page(
                 html_escape(&r.message_ja)
             )
         })
+        .unwrap_or_default();
+
+    let usb_check_html = state
+        .usb_check_message
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|m| format!("<div style=\"border:1px solid #ccc; border-radius:6px; padding:10px; margin-top:8px;\">{}</div>", html_escape(m)))
         .unwrap_or_default();
 
     let usb_drives_html: String = usb_protection::list_removable_drives()
@@ -264,7 +279,11 @@ Fix speed to 10Mbps for streaming (YouTube / U-NEXT / Qobuz etc.) to improve aud
 <h2>Removable drives (USB) / リムーバブルドライブ(USB)</h2>
 <p style="font-size:0.85em; color:#666;">Detected removable drives can be protected: a malicious autorun.inf (if present) is quarantined (renamed, not deleted) and the drive is scanned. / 検出されたリムーバブルドライブを保護できます: 悪意のあるautorun.inf(存在すれば)を隔離(削除ではなくリネーム)し、ドライブをスキャンします。</p>
 {usb_drives_html}
-<p style="color:#999; font-size: 0.8em;">Honest disclosure: Windows itself already disables autorun.inf execution for USB removable drives by default (autorun only applies to optical media) — this feature additionally finds and neutralizes any autorun.inf file that may still be present as a precaution, and does not implement continuous background USB-insertion monitoring (this example checks on request, not automatically the instant a drive is inserted). / 正直な開示: WindowsはUSBリムーバブルドライブのautorun.inf自動実行を既定で無効化済みです(自動実行は光学メディアのみ)——本機能は念のため残存するautorun.infを見つけて無害化するものであり、USB挿入の瞬間を常時バックグラウンド監視する機能ではありません(この例では要求時のみ確認します)。</p>
+<form method="post" action="/check-new-usb" style="margin-top:8px;">
+<button type="submit">Check for newly inserted drives / 新しく挿入されたドライブを確認</button>
+</form>
+{usb_check_html}
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: Windows itself already disables autorun.inf execution for USB removable drives by default (autorun only applies to optical media) — this feature additionally finds and neutralizes any autorun.inf file that may still be present as a precaution. This library still has no OS-level device-insertion event hook (no WM_DEVICECHANGE) — the "check for newly inserted drives" button above polls the current drive list against the last-checked snapshot, so it approximates "the moment you plug it in" only as often as you (or your host app's timer) click it, not truly instantly. / 正直な開示: WindowsはUSBリムーバブルドライブのautorun.inf自動実行を既定で無効化済みです(自動実行は光学メディアのみ)——本機能は念のため残存するautorun.infを見つけて無害化するものです。本ライブラリは依然としてOSレベルのデバイス挿入イベントフック(WM_DEVICECHANGE)を持ちません——上記の「新しく挿入されたドライブを確認」ボタンは、前回確認時点との差分をポーリングで検出するものであり、「挿した瞬間」に近づけるにはご自身(または呼び出し側アプリのタイマー)がこまめに押す/呼ぶ必要があります。</p>
 
 {av_recommendation_html}
 
@@ -288,7 +307,7 @@ Fix speed to 10Mbps for streaming (YouTube / U-NEXT / Qobuz etc.) to improve aud
 <button type="submit">Scan / スキャン</button>
 </form>
 {scan_result_html}
-<p style="color:#999; font-size: 0.8em;">Honest disclosure: no custom virus-detection engine is implemented here — this calls the real ClamAV (clamscan) or opens KINGSOFT's own scan window. ClamAV automates the result; KINGSOFT does not expose a documented command-line scan API, so its result must be confirmed manually. Archive contents are scanned by the chosen engine itself, not by custom decompression code here. This tool never opens or runs a file on your behalf — a threat found is only ever quarantined (moved), and a clean file only ever has its download warning removed; actually opening a file is always your own action. / 正直な開示: 独自のウイルス検出エンジンは実装していません——実際のClamAV(clamscan)を呼び出すか、KINGSOFTのスキャン画面を開きます。ClamAVは結果を自動取得しますが、KINGSOFTは文書化されたコマンドラインAPIが無いため結果は手動確認が必要です。圧縮ファイルの中身はここでの独自解凍ではなく、選択したエンジン自体がスキャンします。このツールがファイルを代わりに開いたり実行したりすることは一切ありません——脅威が見つかった場合は隔離(移動)するのみ、クリーンな場合はダウンロード警告を解除するのみで、実際にファイルを開く操作は常にご自身が行います。</p>
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: no custom virus-detection engine is implemented here — this calls the real ClamAV (clamscan) or triggers KINGSOFT. ClamAV automates the result; KINGSOFT does not expose a documented command-line scan API and, per live testing, its trigger does not reliably open a visible window on its own — open KINGSOFT from its tray icon and confirm the result manually. Archive contents are scanned by the chosen engine itself, not by custom decompression code here. This tool never opens or runs a file on your behalf — a threat found is only ever quarantined (moved), and a clean file only ever has its download warning removed; actually opening a file is always your own action. / 正直な開示: 独自のウイルス検出エンジンは実装していません——実際のClamAV(clamscan)を呼び出すか、KINGSOFTのスキャン画面を開きます。ClamAVは結果を自動取得しますが、KINGSOFTは文書化されたコマンドラインAPIが無く、実機検証の結果、単独では可視の画面を確実には開かないため、タスクトレイから開いて結果を手動確認してください。圧縮ファイルの中身はここでの独自解凍ではなく、選択したエンジン自体がスキャンします。このツールがファイルを代わりに開いたり実行したりすることは一切ありません——脅威が見つかった場合は隔離(移動)するのみ、クリーンな場合はダウンロード警告を解除するのみで、実際にファイルを開く操作は常にご自身が行います。</p>
 </body></html>"#
     )
 }
@@ -512,6 +531,20 @@ fn handle(mut stream: TcpStream, state: &AppState) {
     }
 
     let mut maintenance_report = None;
+    if first_line.starts_with("POST /check-new-usb") {
+        let mut seen = state.usb_seen.lock().unwrap();
+        let newly_inserted = usb_protection::poll_new_drives(&mut seen);
+        drop(seen);
+        let message = if newly_inserted.is_empty() {
+            "No newly inserted drives since the last check. / 前回の確認以降、新しく挿入されたドライブはありません。".to_string()
+        } else {
+            let list = newly_inserted.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+            format!("Newly inserted drive(s) detected: {list} — use \"Protect this drive\" above to scan it. / 新しく挿入されたドライブを検知しました: {list} — 上記の「このドライブを保護」でスキャンしてください。")
+        };
+        *state.usb_check_message.lock().unwrap() = Some(message);
+        let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
+        return;
+    }
     if first_line.starts_with("POST /run-maintenance") {
         maintenance_report = Some(maintenance::run_maintenance());
     }
@@ -537,6 +570,8 @@ fn main() {
         paths: MultiPathManager::from_detected_interfaces(&report),
         router_features: RouterFeatures::new(),
         wan,
+        usb_seen: Mutex::new(HashSet::new()),
+        usb_check_message: Mutex::new(None),
     };
     let state = Mutex::new(state);
 
