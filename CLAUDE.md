@@ -33,6 +33,57 @@ path依存する」パターンの一員。
 
 ## HANDOFF
 
+- **2026-08-11(続き11) 「4層4重の通信」+「RS-SmartTCP自体のACID互換
+  トランザクション」を新規実装(ユーザー指示「4層4重の通信とACID互換、
+  ZFS互換のopen-raid-zとaruaru-db/PostgreSQL/open-web-server/RPoem/
+  open-directx/open-cuda/aruaru-llmの連携も可能にして、オンライン証券
+  などのネット上のDATAを紛失しない設計思想」→スコープ確認の結果
+  「複数WAN/LAN経路で同一データを最大4重送信」+「RS-SmartTCP自体が
+  ACIDトランザクションを実装」と確認して着手)**:
+  1. **`redundant_transmission.rs`**: 渡された送信クロージャを最大
+     [`MAX_REDUNDANT_PATHS`]=4本まで並行実行し、最初に成功した結果を
+     採用する`send_redundant`を実装。**正直な開示**: 実際のソケット
+     送受信は呼び出し側のクロージャに依存(本クレートはTCP/UDP/QUIC等の
+     具体的トランスポートを決め打ちしない既存方針を踏襲)、重複排除
+     (複数経路が同時に届いた場合の冪等性)は呼び出し側の責務、
+     「データを紛失しない」の保証範囲は「送信の可用性向上」であり
+     「永続化の保証」ではないことを明記。
+  2. **`transaction_log.rs`**: Write-Ahead Log(WAL)による最小限の
+     ACID互換トランザクションログ。`[4バイト長][4バイトCRC32(自前
+     実装、外部crate非依存)][ペイロード]`形式で追記、`fsync`相当
+     (`File::sync_data()`)でDurabilityを確保。**正直な開示・スコープ
+     限定(最重要)**: `open-raid-z`(ZFS互換、RAID冗長化・スナップ
+     ショット)や`aruaru-db`/PostgreSQL(複数テーブルにまたがる本格的
+     SQLトランザクション)の代替ではなく、「通信層で送信を試みる前に
+     ローカルへ確実に記録しておく」ための土台に役割を限定(モジュール
+     docに他リポジトリとの役割分担を明記、車輪の再発明を避ける)。
+     `redundant_transmission`と組み合わせ「WAL書き込み→複数経路へ
+     冗長送信→成功でACK」という設計を想定。
+  3. **他リポジトリとの実配線は今回未着手(正直な開示)**: `open-raid-z`/
+     `aruaru-db`/PostgreSQL/`open-web-server`/`RPoem`/`open-directx`/
+     `open-cuda`/`aruaru-llm`との実際のHTTP/ライブラリ連携コードは
+     このセッションでは実装していない——今回はRS-SmartTCP自身が持つ
+     べき土台(冗長送信オーケストレーション+WAL)のみを実装し、各
+     リポジトリ側との実配線は今後の連携作業として残す(スコープが
+     8リポジトリ横断のため、一度に実装せず土台から着手する判断)。
+  4. **検証**: `cargo test --lib`**66件全green**(既存58件+
+     `redundant_transmission`4件+`transaction_log`4件)。テスト実装中に
+     見つけた自己ミス: 最初の`returns_the_first_successful_path_...`
+     テストが「最初の成功で即座に返る」設計にもかかわらず「全経路が
+     必ず試行完了する」ことを誤ってアサートしており、データレースで
+     間欠的に失敗した——設計通りの早期リターン挙動を正しく反映する
+     形にテストを修正した。`transaction_log`は実際にファイルへの
+     書き込み・プロセス再起動相当の再オープン・不完全レコード
+     (書き込み途中で中断)・チェックサム不一致(ビット反転)の4パターン
+     全てで正しく動作することを実ファイルI/Oで検証済み。
+  - 次にすべきこと: (1) `redundant_transmission`+`transaction_log`を
+    `open-web-server-wire`等の実際の呼び出し元から配線する、
+    (2) `open-raid-z`側のZFS互換実装との役割分担が実際に噛み合うか
+    (WALのcheckpoint/コンパクションをどちらが担うか等)の設計調整、
+    (3) dream-osへの同じ設計思想の展開(ユーザー指示、別リポジトリの
+    ため別セッションでスコープを切って着手)、(4) open-easy-web
+    (全リポジトリ管理)からのこれらモジュールの可視化・管理UIは未着手。
+
 - **2026-08-11(続き10) TLS証明書生成(`tls_inspection.rs`、CA/リーフ発行の
   本実装)+WiFi世代×周波数帯ロードマップメタデータ(`wifi_roadmap.rs`)を
   新設(ユーザー指示「TLS復号・AI侵入検知の本実装して」→スコープ確認の
