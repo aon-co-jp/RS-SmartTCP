@@ -33,6 +33,57 @@ path依存する」パターンの一員。
 
 ## HANDOFF
 
+- **2026-08-11(続き10) TLS証明書生成(`tls_inspection.rs`、CA/リーフ発行の
+  本実装)+WiFi世代×周波数帯ロードマップメタデータ(`wifi_roadmap.rs`)を
+  新設(ユーザー指示「TLS復号・AI侵入検知の本実装して」→スコープ確認の
+  上、証明書生成は本実装・実際の復号プロキシ本体は次回以降と正直に
+  区切って着手。WiFiは「2.4G/5G/6Gの組み合わせ×WiFi4〜8対応、将来の
+  ロードマップを考慮」の日英Web調査+実装指示への対応)**:
+  1. **「外部crates.io非依存」原則の一回限りの例外(ユーザー承認済み)**:
+     `rcgen`(features: `pem`, `x509-parser`)を追加。TLS証明書生成
+     (X.509 CSR構築・署名)はOS標準ツールの組み合わせだけでは安全に
+     代替できないため。
+  2. **`tls_inspection.rs`**: `ensure_root_ca(dir)`(初回はローカルCAを
+     新規生成・保存、以後は再利用——毎回新しいCAを黙って発行しない)・
+     `issue_leaf_cert(&ca, hostname)`(SNIホスト名向けリーフ証明書を
+     オンデマンド発行)を実装、3件のテストで実際に生成される証明書PEM
+     の内容を検証。**正直な開示(最重要のスコープ限定)**: 実際にTCP
+     接続を受けてTLSサーバーとして終端し宛先へ再接続する透過プロキシ
+     本体(MITMループ処理そのもの)は**未実装**——安全に検証できる範囲
+     (証明書生成)のみを「本実装」と区切った。生成したCAを対象端末の
+     信頼済みルートストアへ追加する操作も、常にユーザー自身に委ねる
+     (本ライブラリはOSの証明書ストアに一切触れない)。
+  2. **`wifi_roadmap.rs`**: WiFi4(802.11n)〜WiFi8(802.11bn)の各世代が
+     対応する周波数帯(2.4/5/6GHz)をIEEE仕様に基づき定義
+     (`WifiGeneration::supported_bands`)、`WifiChannelRegistry`で
+     `multi_path`の各WiFiチャンネルへ世代・帯域ラベルを設定・検証
+     (IEEE仕様上無効な組み合わせ、例: WiFi5+2.4GHz、は拒否)。
+     日英Web調査で裏取り: WiFi 8(IEEE 802.11bn)は**2026-08時点で
+     ドラフト段階**(Draft 1.0は2025年7月承認、最終標準化目標2028年9月、
+     消費者向け製品の普及は2027〜2028年見込み)であり正式規格ではない
+     ことを`WifiGeneration::is_finalized_standard()`で明示——
+     「WiFi 8対応」を確定事実として誇張しない。フレッツ光クロス
+     (最大10Gbps)向けレンタルルーターのWiFi 7対応開始(2026年5月〜)・
+     IOWN/APNとの関係も参考情報としてモジュールdocに記録(実装対象は
+     引き続き回線側ではなくWiFi世代/帯域メタデータのみ)。
+  3. **複数WAN業者(最大10社)への対応は追加実装不要と確認**:
+     `multi_wan.rs`の`MultiWanManager::register_line`は既に
+     `MAX_WAN_LINES=10`本まで、各回線に任意の名前(プロバイダ名を含む
+     自由文字列)を設定できる設計のため、「WAN業者を最大10社まで」は
+     既存の実装がそのまま満たしている(ユーザー確認依頼に対し、
+     コード変更ではなく確認で回答)。
+  4. **検証**: `cargo test --lib`**58件全green**(既存50件+
+     `tls_inspection`3件+`wifi_roadmap`5件)。
+  - 次にすべきこと: (1) TLS透過プロキシ本体(TCP accept→TLSサーバー
+    終端→宛先へTLSクライアント再接続→双方向バイトコピー)の実装、
+    (2) `wifi_roadmap::WifiChannelRegistry`を`multi_path`/GUIへ実配線
+    (現状は独立モジュールとして存在するのみ、`status_gui.rs`への
+    表示・設定フォームは未実装)、(3) aruaru-llm側の
+    `POST /v1/security/classify-traffic`(AI侵入検知、同日実装)を
+    RS-SmartTCP側から実際にHTTPで呼ぶ配線(現状はaruaru-llm側の
+    エンドポイントのみ実装、RS-SmartTCP側のHTTPクライアント配線は
+    次回)。
+
 - **2026-08-11(続き9) `poll_new_drives`をGUIへ実配線+KINGSOFT過大表現の
   追加訂正**:
   1. `examples/status_gui.rs`に「新しく挿入されたドライブを確認」

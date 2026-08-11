@@ -9,3 +9,6 @@ repository = "https://github.com/aon-co-jp/RS-SmartTCP"
 [lib]
 name = "rs_smarttcp"
 path = "src/lib.rs"
+
+[dependencies]
+rcgen = { version = "0.14.9", features = ["x509-parser"] }

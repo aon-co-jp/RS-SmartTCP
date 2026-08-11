@@ -69,8 +69,10 @@ pub mod multi_path;
 pub mod multi_wan;
 pub mod network_interfaces;
 pub mod router_features;
+pub mod tls_inspection;
 pub mod usb_protection;
 pub mod wan_config;
+pub mod wifi_roadmap;
 
 pub use bandwidth_policy::{BandwidthPolicy, TrafficPurpose};
 pub use multi_path::MultiPathManager;
