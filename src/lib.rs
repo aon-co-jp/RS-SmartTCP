@@ -62,6 +62,14 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+pub mod bandwidth_policy;
+pub mod multi_path;
+pub mod network_interfaces;
+
+pub use bandwidth_policy::{BandwidthPolicy, TrafficPurpose};
+pub use multi_path::MultiPathManager;
+pub use network_interfaces::{InterfaceKind, NetworkInterfaceReport};
+
 /// TCP(RFC 6298)と同じ重み。QUIC(RFC 9002)も同じαを採用している。
 const ALPHA: f64 = 1.0 / 8.0;
 /// TCP(RFC 6298)と同じ重み。
