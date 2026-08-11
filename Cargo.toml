@@ -15,4 +15,18 @@ chacha20poly1305 = "0.11.0"
 open_raid_z_core = { version = "0.0.1", path = "../open-raid-z/open_runo_zfs_source/open_raid_z_core", default-features = false }
 rand = "0.10.2"
 rcgen = { version = "0.14.9", features = ["x509-parser"] }
+
+# zfs_accel_hlslの既定feature("gpu")はWindows専用のD3D12/DirectML(`windows`
+# クレート)に依存しており、Windows以外のターゲット(Android/Linux/macOS等)
+# ではそもそもコンパイルできない(2026-08-11、open-englishのAndroidクロス
+# コンパイルで実際にビルド失敗として発覚——`rs-smarttcp`をpath依存する
+# 下流クレート〈RPoem経由〉が巻き添えでビルドできなくなっていた)。
+# ターゲットごとに依存を切り替え、Windows以外ではCPUフォールバック実装
+# のみを使う(`raid_bridge.rs`のdetect_parity_acceleratorは`gpu`/`vulkan`
+# いずれのfeatureも無効な場合、常にCPUフォールバックを返す設計、
+# zfs_accel_hlsl::device::detect_best_acceleratorの既存実装のまま)。
+[target.'cfg(windows)'.dependencies]
 zfs_accel_hlsl = { version = "0.0.1", path = "../open-raid-z/open_runo_zfs_source/zfs_accel_hlsl" }
+
+[target.'cfg(not(windows))'.dependencies]
+zfs_accel_hlsl = { version = "0.0.1", path = "../open-raid-z/open_runo_zfs_source/zfs_accel_hlsl", default-features = false }

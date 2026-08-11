@@ -33,6 +33,41 @@ path依存する」パターンの一員。
 
 ## HANDOFF
 
+- **2026-08-11(続き16) `zfs_accel_hlsl`のWindows専用`gpu`featureが
+  既定有効のままだったため、`rs-smarttcp`をpath依存する下流(RPoem経由の
+  `open-english-server`)のAndroidクロスコンパイルが壊れていたバグを
+  発見・修正(open-englishのAndroid単体アプリ化作業中に実際のビルド
+  失敗として発覚)**:
+  1. **発見の経緯**: `open-english/server`をAndroid向けに
+     `cargo ndk build`した際、`zfs_accel_hlsl`(D3D12/DirectML、
+     `windows`クレート使用)が非Windows(aarch64-linux-android)ターゲット
+     で225件のコンパイルエラーで失敗。原因は`zfs_accel_hlsl`の
+     `default = ["gpu"]`(`gpu`featureが`windows`クレートに依存)を、
+     本クレートの`raid_bridge.rs`(2026-08-11(続き12)で追加)が
+     `default-features`を指定せず素朴に依存していたこと。
+  2. **修正**: `Cargo.toml`の`zfs_accel_hlsl`依存をターゲット別に分離
+     (`[target.'cfg(windows)'.dependencies]`は既定〈`gpu`有効〉のまま、
+     `[target.'cfg(not(windows))'.dependencies]`は`default-features =
+     false`でCPUフォールバックのみ)。`zfs_accel_hlsl::device::
+     detect_best_accelerator`自体が`gpu`/`vulkan`いずれのfeatureも
+     無効な場合CPUフォールバックを返す既存設計のため、`raid_bridge.rs`
+     側のコード変更は不要だった。
+  3. **検証**: Windows側`cargo build --lib`成功(regression無し)、
+     `cargo test --lib raid_bridge`2件green。Android向け
+     `cargo ndk -t aarch64-linux-android build --release`
+     (`open-english/server`側)が実際に成功することを確認
+     (修正前は225件のコンパイルエラーで失敗していたことを実際に再現
+     した上での修正確認)。
+  - 次にすべきこと: (1) 同じ問題が`dream-os-raid-bridge`
+    (`open-raid-z`を直接path依存、Androidクロスコンパイルは未実施と
+    2026-08-08 HANDOFFに明記済み)にも将来Android対応する際に発生
+    しうるため、着手時にこの修正パターンを参照すること、(2)
+    `zfs_accel_hlsl`自体(`open-raid-z`側)の`default = ["gpu"]`が
+    非Windows環境での`cargo build`(feature指定無し)を壊す設計自体は
+    残っている——`open-raid-z`側でdefault featureを空にする等の
+    より根本的な修正は今回のスコープ外(影響範囲の広いクレート自体の
+    変更のため、別セッションでの検討を推奨)。
+
 - **2026-08-11(続き15) 残バックログ3件を実装(経路コストの実測値化・
   最適化結果の実際のトラフィック制御への反映・secure_channel/
   transaction_log/redundant_transmissionのGUI可視化)、ユーザー指示
