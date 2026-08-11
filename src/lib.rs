@@ -64,6 +64,7 @@ use std::time::Duration;
 
 pub mod bandwidth_policy;
 pub mod download_protection;
+pub mod maintenance;
 pub mod multi_path;
 pub mod multi_wan;
 pub mod network_interfaces;

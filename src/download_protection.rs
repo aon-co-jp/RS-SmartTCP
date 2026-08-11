@@ -254,6 +254,47 @@ pub fn should_block_execution_until_scanned(path: &Path) -> bool {
     has_mark_of_the_web(path)
 }
 
+/// 「Mark of the Web」を解除する(=Windowsのファイルのプロパティに
+/// ある「ブロックの解除」チェックボックスと全く同じ、実在するWindows
+/// 標準の仕組み——`Zone.Identifier`代替データストリームを削除する
+/// だけ)。**正直な開示・重要な安全設計**: この関数は**スキャン結果が
+/// `Clean`または`ThreatRemoved`の場合にのみ**呼び出す前提であり、
+/// `verify_and_unblock`経由での利用を推奨する。ファイルを代わりに
+/// 起動する機能は一切持たない——ブロックを解除した後、実際に開くか
+/// どうかは常にユーザー自身の操作(ダブルクリック等)に委ねる設計
+/// (ユーザー指示「ダウンロードしたファイルを自動実行する」機能・
+/// 「AIが自動判定して必要なら自動実行する」機能は、スキャンで安全と
+/// 判定されても残るゼロデイ・スキャン回避のリスクをそのまま自動実行に
+/// つなげてしまうため、意図的に実装しないという合意に基づく)。
+fn remove_mark_of_the_web(path: &Path) -> bool {
+    let ads_path = format!("{}:Zone.Identifier", path.display());
+    std::fs::remove_file(&ads_path).is_ok()
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifyAndUnblockResult {
+    pub scan: ScanResult,
+    /// スキャンが`Clean`または`ThreatRemoved`だった場合のみ`true`になり
+    /// うる。ブロック解除に成功したかどうか(元々ブロックされていな
+    /// かった場合も`false`——実際に解除処理が効いたかどうかを正直に
+    /// 反映する)。
+    pub unblocked: bool,
+}
+
+/// スキャン→(安全と確認できた場合のみ)Mark of the Web解除、という
+/// 一連の流れを行う。**ファイルを実行する処理は一切含まない**——
+/// あくまで「安全と確認できたファイルについて、以後ダブルクリックで
+/// 開いてもSmartScreen等の警告が出ないようにする」ところまでに留める。
+pub fn verify_and_unblock(backend: ScannerBackend, path: &Path, quarantine_dir: &Path) -> VerifyAndUnblockResult {
+    let scan = scan_file(backend, path, quarantine_dir);
+    let unblocked = match scan.outcome {
+        ScanOutcome::Clean => remove_mark_of_the_web(path),
+        ScanOutcome::ThreatRemoved => false, // 元のパスにファイルはもう存在しない(隔離済み)。
+        _ => false,
+    };
+    VerifyAndUnblockResult { scan, unblocked }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +328,23 @@ mod tests {
     #[test]
     fn nonexistent_file_has_no_mark_of_the_web() {
         assert!(!has_mark_of_the_web(Path::new("Z:\\definitely\\does\\not\\exist.txt")));
+    }
+
+    #[test]
+    fn remove_mark_of_the_web_only_attempted_when_clean_or_no_op_otherwise() {
+        // scan_fileはClamAV未インストール環境ではScannerUnavailableを
+        // 返す(このテスト環境の実際の状態)——その場合、決して
+        // unblocked: trueにならないことを確認する(黙って安全側へ
+        // 倒れることの検証、実行を許可する誤判定が起きないこと)。
+        let temp_dir = std::env::temp_dir().join(format!("rs-smarttcp-unblock-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let file = temp_dir.join("sample.txt");
+        std::fs::write(&file, "hello").unwrap();
+
+        let result = verify_and_unblock(ScannerBackend::ClamAv, &file, &default_quarantine_dir());
+        assert!(!result.unblocked, "must never unblock when the scan outcome wasn't Clean");
+        assert_eq!(result.scan.outcome, ScanOutcome::ScannerUnavailable);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

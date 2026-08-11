@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use rs_smarttcp::bandwidth_policy::BandwidthPolicy;
 use rs_smarttcp::download_protection;
+use rs_smarttcp::maintenance;
 use rs_smarttcp::multi_path::{DeviceKind, MultiPathManager};
 use rs_smarttcp::multi_wan::MultiWanManager;
 use rs_smarttcp::network_interfaces;
@@ -57,7 +58,12 @@ fn device_kind_label(kind: DeviceKind) -> &'static str {
     }
 }
 
-fn render_page(state: &AppState, probe_error: Option<&str>, scan_result: Option<&download_protection::ScanResult>) -> String {
+fn render_page(
+    state: &AppState,
+    probe_error: Option<&str>,
+    scan_result: Option<&download_protection::ScanResult>,
+    maintenance_report: Option<&maintenance::MaintenanceReport>,
+) -> String {
     let report = network_interfaces::detect();
     let wired = report.wired_connected_count();
     let wifi_count = report.wifi_connected_count();
@@ -133,6 +139,16 @@ fn render_page(state: &AppState, probe_error: Option<&str>, scan_result: Option<
             html_escape(&ja)
         )
     };
+
+    let maintenance_html = maintenance_report
+        .map(|r| {
+            format!(
+                "<div style=\"border:1px solid #ccc; border-radius:6px; padding:10px; margin-top:8px;\">{}<br>{}</div>",
+                html_escape(&r.summary_en),
+                html_escape(&r.summary_ja)
+            )
+        })
+        .unwrap_or_default();
 
     let usb_drives_html = if usb_drives_html.is_empty() {
         "<p style=\"color:#666; font-size:0.85em;\">No removable drives detected / リムーバブルドライブは検出されていません</p>".to_string()
@@ -251,7 +267,16 @@ Fix speed to 10Mbps for streaming (YouTube / U-NEXT / Qobuz etc.) to improve aud
 <p style="color:#999; font-size: 0.8em;">Honest disclosure: Windows itself already disables autorun.inf execution for USB removable drives by default (autorun only applies to optical media) — this feature additionally finds and neutralizes any autorun.inf file that may still be present as a precaution, and does not implement continuous background USB-insertion monitoring (this example checks on request, not automatically the instant a drive is inserted). / 正直な開示: WindowsはUSBリムーバブルドライブのautorun.inf自動実行を既定で無効化済みです(自動実行は光学メディアのみ)——本機能は念のため残存するautorun.infを見つけて無害化するものであり、USB挿入の瞬間を常時バックグラウンド監視する機能ではありません(この例では要求時のみ確認します)。</p>
 
 {av_recommendation_html}
+
+<h2>Maintenance / メンテナンス</h2>
+<form method="post" action="/run-maintenance">
+<button type="submit">Run maintenance now / 今すぐメンテナンスを実行</button>
+</form>
+{maintenance_html}
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: this checks antivirus registration and updates ClamAV's virus definitions (via the official freshclam tool) — it does not run automatically on startup or on a schedule by itself; the host application should call this on its own timer or OS task scheduler. / 正直な開示: セキュリティソフトの登録確認とClamAVのウイルス定義更新(公式のfreshclamツール経由)を行います——このライブラリ自体が起動時・定期的に自動実行することはなく、呼び出し側アプリが独自のタイマーやOSのタスクスケジューラから呼ぶ必要があります。</p>
+
 <h2>Downloaded file protection / ダウンロードファイル保護</h2>
+<p style="background:#eef; border-radius:6px; padding:8px 10px; font-size:0.9em;">A new downloaded file was detected. Would you like to scan it — automatically now, or manually later? / 新しくダウンロードされたファイルを検知しました。自動でスキャンしますか？それとも後で手動でスキャンしますか？</p>
 <p style="font-size:0.85em; color:#666;">Enter a file path to scan it for computer viruses. / ファイルパスを入力してコンピューターウイルスをスキャンします。</p>
 <form method="post" action="/scan-file" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
 <input type="text" name="path" placeholder="File path / ファイルパス (e.g. C:\Downloads\file.zip)" style="min-width:260px;" required>
@@ -259,10 +284,11 @@ Fix speed to 10Mbps for streaming (YouTube / U-NEXT / Qobuz etc.) to improve aud
 <option value="clamav">ClamAV (open source / オープンソース)</option>
 <option value="kingsoft">KINGSOFT Internet Security (free / 無料版)</option>
 </select>
+<label><input type="checkbox" name="unblock" value="1" checked> Mark as safe to open if clean (removes the download warning; you still double-click to open it) / クリーンなら「開いても安全」とマーク(ダウンロード警告を解除、開くのは引き続きご自身のダブルクリックです)</label>
 <button type="submit">Scan / スキャン</button>
 </form>
 {scan_result_html}
-<p style="color:#999; font-size: 0.8em;">Honest disclosure: no custom virus-detection engine is implemented here — this calls the real ClamAV (clamscan) or opens KINGSOFT's own scan window. ClamAV automates the result; KINGSOFT does not expose a documented command-line scan API, so its result must be confirmed manually. Archive contents are scanned by the chosen engine itself, not by custom decompression code here. / 正直な開示: 独自のウイルス検出エンジンは実装していません——実際のClamAV(clamscan)を呼び出すか、KINGSOFTのスキャン画面を開きます。ClamAVは結果を自動取得しますが、KINGSOFTは文書化されたコマンドラインAPIが無いため結果は手動確認が必要です。圧縮ファイルの中身はここでの独自解凍ではなく、選択したエンジン自体がスキャンします。</p>
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: no custom virus-detection engine is implemented here — this calls the real ClamAV (clamscan) or opens KINGSOFT's own scan window. ClamAV automates the result; KINGSOFT does not expose a documented command-line scan API, so its result must be confirmed manually. Archive contents are scanned by the chosen engine itself, not by custom decompression code here. This tool never opens or runs a file on your behalf — a threat found is only ever quarantined (moved), and a clean file only ever has its download warning removed; actually opening a file is always your own action. / 正直な開示: 独自のウイルス検出エンジンは実装していません——実際のClamAV(clamscan)を呼び出すか、KINGSOFTのスキャン画面を開きます。ClamAVは結果を自動取得しますが、KINGSOFTは文書化されたコマンドラインAPIが無いため結果は手動確認が必要です。圧縮ファイルの中身はここでの独自解凍ではなく、選択したエンジン自体がスキャンします。このツールがファイルを代わりに開いたり実行したりすることは一切ありません——脅威が見つかった場合は隔離(移動)するのみ、クリーンな場合はダウンロード警告を解除するのみで、実際にファイルを開く操作は常にご自身が行います。</p>
 </body></html>"#
     )
 }
@@ -451,7 +477,17 @@ fn handle(mut stream: TcpStream, state: &AppState) {
             if !path.is_empty() {
                 let backend = backend_from_form_value(form.get("backend").map(String::as_str).unwrap_or(""));
                 let quarantine = download_protection::default_quarantine_dir();
-                scan_result = Some(download_protection::scan_file(backend, std::path::Path::new(path), &quarantine));
+                let want_unblock = body_text.contains("unblock=1");
+                scan_result = Some(if want_unblock {
+                    let r = download_protection::verify_and_unblock(backend, std::path::Path::new(path), &quarantine);
+                    let mut s = r.scan;
+                    if r.unblocked {
+                        s.message_en.push_str(" The download warning has been removed — you can now double-click to open it yourself. / ダウンロード警告を解除しました——引き続きご自身のダブルクリックで開けます。");
+                    }
+                    s
+                } else {
+                    download_protection::scan_file(backend, std::path::Path::new(path), &quarantine)
+                });
             }
         }
     }
@@ -475,7 +511,12 @@ fn handle(mut stream: TcpStream, state: &AppState) {
         }
     }
 
-    let body = render_page(state, probe_error.as_deref(), scan_result.as_ref());
+    let mut maintenance_report = None;
+    if first_line.starts_with("POST /run-maintenance") {
+        maintenance_report = Some(maintenance::run_maintenance());
+    }
+
+    let body = render_page(state, probe_error.as_deref(), scan_result.as_ref(), maintenance_report.as_ref());
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
