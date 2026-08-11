@@ -33,6 +33,48 @@ path依存する」パターンの一員。
 
 ## HANDOFF
 
+- **2026-08-11(続き15) 残バックログ3件を実装(経路コストの実測値化・
+  最適化結果の実際のトラフィック制御への反映・secure_channel/
+  transaction_log/redundant_transmissionのGUI可視化)、ユーザー指示
+  「残バックログ…を今進めて」への対応**:
+  1. **経路コストの実測値化**: `network_interfaces::NetworkInterface`に
+     `link_speed_bps`(`Get-NetAdapter`の`Speed`プロパティ、実測bps)を
+     追加。`MultiPathManager`が`PathEntry`にリンク速度を保持し
+     (`register_device_path_with_speed`)、`registered_paths_with_link_
+     speed`で取得可能に。GUIの`/optimize-paths`は実測値が取れれば
+     Mbps単位でコストに使い、取れなければ仮の固定値へ正直にフォール
+     バック(結果表示でどちらを使ったか明示)。実機で
+     「cost source: real link speed (Mbps)」が実際に表示されることを
+     確認。
+  2. **最適化結果の実際のトラフィック制御への反映**: `MultiPathManager`
+     に`enabled`フラグ(`PathEntry`)+`set_enabled`/`is_enabled`を追加、
+     `best_path`が無効化された経路を選択対象から除外するよう変更。
+     GUIの`/optimize-paths`ハンドラが`path_optimizer`の
+     activate/deactivate結果を実際に`set_enabled`へ反映し、経路一覧
+     テーブルに🟢有効/⛔無効化のステータス列を追加。**正直な開示**:
+     物理的な接続断ではなく、新規トラフィックの経路選択への反映のみ。
+     実機で`budget=1`(全経路が予算超過)を指定すると実際に全経路が
+     ⛔無効化と表示されることを確認。
+  3. **secure_channel/transaction_log/redundant_transmissionのGUI
+     可視化**: 「Durability + encryption demo」セクションを新設。
+     入力したテストメッセージを(1)`secure_channel`で暗号化→
+     (2)`transaction_log`でWALへfsyncまで確実に記録→(3)
+     `redundant_transmission`で2経路(1つはわざと失敗)へ冗長送信→
+     (4)受信側で復号・検証、という4段階のパイプラインを実際に実行し
+     結果を表示する。実機で`curl`により全4段階が正しく動作すること
+     ("transfer $100 to account X"が完全な形で復号されることを含む)を
+     確認済み。
+  4. **検証**: `cargo test --lib`**82件全green**(既存80件+
+     `multi_path`新規2件〈`set_enabled`が`best_path`を正しく除外・
+     未登録経路への操作が安全にfalseを返す〉)。`cargo build --example
+     status_gui`成功、実機起動して3機能すべて`curl`で動作確認。
+  - 次にすべきこと: (1) `link_speed_bps`が取得できない非Windows環境
+    での固定値フォールバックの妥当性再検討、(2) `durability-demo`の
+    「冗長経路」は実演用のシミュレートされたクロージャのままであり、
+    実際のネットワーク伝送路(TCP/UDP/QUIC)への配線は引き続き未着手、
+    (3) `set_enabled`によるトラフィック制御は`best_path`のみに反映
+    されており、`multi_wan`側のWAN回線選択には未反映。
+
 - **2026-08-11(続き14) `path_optimizer`+`raid_bridge`をGUIへ実配線
   (ユーザー指示「未着手、未完成、次フェーズなどを実装して、実用性向上、
   完成度向上」への対応、前回HANDOFFの「次にすべきこと(1)」)**:

@@ -57,6 +57,11 @@ pub struct NetworkInterface {
     pub name: String,
     pub kind: InterfaceKind,
     pub connected: bool,
+    /// リンク速度(bps、`Get-NetAdapter`の`LinkSpeed`プロパティの実測値、
+    /// 未接続・取得不可の場合は`None`)。2026-08-11追加、ユーザー指示
+    /// 「経路コストの実測値化」への対応——契約帯域や実測スループットの
+    /// 直接計測ではないが、OSが実際に報告するリンク速度という実測値。
+    pub link_speed_bps: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -98,10 +103,11 @@ pub fn parse_netadapter_output(output: &str) -> NetworkInterfaceReport {
             continue;
         }
         let parts: Vec<&str> = trimmed.split("||").collect();
-        if parts.len() != 3 {
+        if parts.len() < 3 {
             continue;
         }
         let (name, status, media_type) = (parts[0].trim(), parts[1].trim(), parts[2].trim());
+        let link_speed_bps = parts.get(3).and_then(|s| s.trim().parse::<u64>().ok()).filter(|&v| v > 0);
         let media_lower = media_type.to_lowercase();
         let kind = if media_lower.contains("802.11") || media_lower.contains("native 802.11") {
             InterfaceKind::Wifi
@@ -113,7 +119,7 @@ pub fn parse_netadapter_output(output: &str) -> NetworkInterfaceReport {
             InterfaceKind::Other
         };
         let connected = status.eq_ignore_ascii_case("up");
-        interfaces.push(NetworkInterface { name: name.to_string(), kind, connected });
+        interfaces.push(NetworkInterface { name: name.to_string(), kind, connected, link_speed_bps });
     }
     NetworkInterfaceReport { interfaces }
 }
@@ -126,7 +132,7 @@ pub fn detect() -> NetworkInterfaceReport {
         return NetworkInterfaceReport::default();
     }
     let script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
-Get-NetAdapter | ForEach-Object { $_.Name + '||' + $_.Status + '||' + $_.PhysicalMediaType }";
+Get-NetAdapter | ForEach-Object { $_.Name + '||' + $_.Status + '||' + $_.PhysicalMediaType + '||' + $_.Speed }";
     match Command::new("powershell").args(["-NoProfile", "-Command", script]).output() {
         Ok(out) => {
             let text = String::from_utf8_lossy(&out.stdout);

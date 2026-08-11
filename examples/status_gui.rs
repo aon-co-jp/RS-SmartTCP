@@ -32,7 +32,10 @@ use rs_smarttcp::multi_wan::MultiWanManager;
 use rs_smarttcp::network_interfaces;
 use rs_smarttcp::path_optimizer;
 use rs_smarttcp::raid_bridge;
+use rs_smarttcp::redundant_transmission;
 use rs_smarttcp::router_features::{RouterFeatures, ROUTER_APP_PLUGINS, SECURITY_ROUTER_PLUGINS};
+use rs_smarttcp::secure_channel::SecureChannel;
+use rs_smarttcp::transaction_log::TransactionLog;
 use rs_smarttcp::usb_protection;
 
 fn bind_addr() -> String {
@@ -51,6 +54,8 @@ struct AppState {
     usb_check_message: Mutex<Option<String>>,
     /// 直近の経路選択最適化(東芝SBM)の結果表示用テキスト。
     path_optimization_message: Mutex<Option<String>>,
+    /// 直近の「4層暗号化+WAL+冗長送信」デモの結果表示用テキスト。
+    durability_demo_message: Mutex<Option<String>>,
 }
 
 fn device_kind_label(kind: DeviceKind) -> &'static str {
@@ -97,16 +102,17 @@ fn render_page(
     let best = state.paths.best_path();
     let device_rows: String = state
         .paths
-        .registered_paths()
+        .registered_paths_with_status()
         .into_iter()
-        .map(|(name, kind, rtt_ms)| {
+        .map(|(name, kind, rtt_ms, _link_speed_bps, enabled)| {
             let is_best = best.as_deref() == Some(name.as_str());
             format!(
-                "<tr{}><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr{}><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                 if is_best { " style=\"font-weight:bold;background:#eef8ee;\"" } else { "" },
                 html_escape(&name),
                 device_kind_label(kind),
-                rtt_ms.map(|v| format!("{v:.1} ms{}", if is_best { " (best / 最良経路)" } else { "" })).unwrap_or_else(|| "no data / 未測定".to_string())
+                rtt_ms.map(|v| format!("{v:.1} ms{}", if is_best { " (best / 最良経路)" } else { "" })).unwrap_or_else(|| "no data / 未測定".to_string()),
+                if enabled { "🟢 enabled / 有効" } else { "⛔ disabled by optimizer / 最適化により無効化" }
             )
         })
         .collect();
@@ -130,6 +136,14 @@ fn render_page(
         .unwrap()
         .as_ref()
         .map(|m| format!("<div style=\"border:1px solid #ccc; border-radius:6px; padding:10px; margin-top:8px;\">{}</div>", html_escape(m)))
+        .unwrap_or_default();
+
+    let durability_demo_html = state
+        .durability_demo_message
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|m| format!("<div style=\"border:1px solid #ccc; border-radius:6px; padding:10px; margin-top:8px; white-space:pre-line;\">{}</div>", html_escape(m)))
         .unwrap_or_default();
 
     let raid_accel_html = match raid_bridge::detect_parity_accelerator() {
@@ -257,7 +271,7 @@ fn render_page(
 <h2>Router / NAS / External HDD paths / 経路一覧</h2>
 <p style="font-size:0.85em; color:#666;">Add your router, NAS, or external HDD's address below to measure and compare its response time (up to 10 wired + Wi-Fi). / 下のフォームからルーター・NAS・外付けHDDのアドレスを追加すると、応答時間を測定・比較できます(有線最大10本+WiFi)。</p>
 <table border="1" cellpadding="6" style="border-collapse: collapse;">
-<tr><th>Name / 名前</th><th>Kind / 種別</th><th>Response time / 応答時間</th></tr>
+<tr><th>Name / 名前</th><th>Kind / 種別</th><th>Response time / 応答時間</th><th>Traffic control / トラフィック制御</th></tr>
 {device_rows}
 </table>
 
@@ -276,11 +290,20 @@ fn render_page(
 <button type="submit">Optimize / 最適化</button>
 </form>
 {path_optimization_html}
-<p style="color:#999; font-size: 0.8em;">Honest disclosure: for this small a number of links (max 10), brute force finds the exact optimum instantly — this demonstrates wiring SBM into a real decision path, not a necessity. Cost per link is a placeholder (fixed value), not a real bandwidth measurement. / 正直な開示: この規模(最大10経路)なら全探索でも瞬時に厳密解が求まり、SBMを使う実用上の必要性は薄いものです——実際の意思決定パスへの配線実証が目的です。経路ごとのコストは仮の固定値であり、実際の帯域測定ではありません。</p>
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: for this small a number of links (max 10), brute force finds the exact optimum instantly — this demonstrates wiring SBM into a real decision path, not a necessity. Cost per link uses the real link speed (Mbps) reported by the OS when available, otherwise falls back to a placeholder fixed value (the result message shows which). / 正直な開示: この規模(最大10経路)なら全探索でも瞬時に厳密解が求まり、SBMを使う実用上の必要性は薄いものです——実際の意思決定パスへの配線実証が目的です。経路ごとのコストは、取得できる場合はOSが報告する実測リンク速度(Mbps)を使用し、取得できない場合は仮の固定値へフォールバックします(結果表示でどちらか分かります)。</p>
 
 <h2>RAID-Z2/Z3 parity accelerator / RAID-Z2/Z3パリティアクセラレータ</h2>
 {raid_accel_html}
 <p style="color:#999; font-size: 0.8em;">Honest disclosure: this reuses open-raid-z + zfs_accel_hlsl as-is (no new RAID implementation here). Only FileBackedDevice (loopback file) is supported today — no real NVMe block device path exists yet. / 正直な開示: open-raid-z + zfs_accel_hlslをそのまま再利用しています(新規RAID実装はありません)。現時点でFileBackedDevice(ループバックファイル)のみ対応で、実NVMeブロックデバイスへの経路はまだありません。</p>
+
+<h2>Durability + encryption demo / 耐障害性・暗号化デモ</h2>
+<p style="font-size:0.85em; color:#666;">Demonstrates the full pipeline for "never lose data": encrypt (secure_channel, ChaCha20-Poly1305 + replay guard) → durably record (transaction_log, WAL with fsync) → send over up to 4 redundant paths (redundant_transmission, first success wins). / 「データを紛失しない」一連の流れを実演します: 暗号化(secure_channel)→WALへ確実に記録(transaction_log、fsync)→最大4経路への冗長送信(redundant_transmission、最初の成功を採用)。</p>
+<form method="post" action="/durability-demo" style="display:flex; gap:8px; align-items:center;">
+<input type="text" name="message" placeholder="Test message / テストメッセージ" value="transfer $100 to account X" style="min-width:260px;">
+<button type="submit">Run demo / デモを実行</button>
+</form>
+{durability_demo_html}
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: the "redundant paths" here are simulated closures (one deliberately fails) for demonstration — real network transports are not wired in this example. / 正直な開示: ここでの「冗長経路」は実演用のシミュレートされたクロージャです(1つはわざと失敗させています)——この例では実際のネットワーク伝送路は配線していません。</p>
 {error_html}
 <form method="post" action="/probe" style="margin-top: 12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
 <input type="text" name="name" placeholder="Name / 名前 (e.g. NAS)" required>
@@ -604,16 +627,24 @@ fn handle(mut stream: TcpStream, state: &AppState) {
         let form = parse_form(body_text);
         let budget: u32 = form.get("budget").and_then(|v| v.parse().ok()).unwrap_or(200);
 
-        let registered = state.paths.registered_paths();
-        // 正直な開示: コストは実際の帯域測定値ではなく、デモ用の仮の
-        // 固定値(有線=100、WiFi/Bluetooth=50、その他=150)。品質は
-        // RTT実測値の逆数×100(未測定なら最低品質として1.0を割り当てる)。
+        let registered = state.paths.registered_paths_with_link_speed();
+        // コストは実測リンク速度(bps、Get-NetAdapterのSpeedプロパティ)を
+        // Mbps単位に換算した値を使う——実測値が取れない環境(非Windows・
+        // 検出失敗)では、正直な開示の上でデモ用の仮の固定値
+        // (有線=100、WiFi/Bluetooth=50、その他=150)へフォールバックする。
+        let mut used_real_link_speed = false;
         let entries: Vec<(String, u32, f64)> = registered
             .into_iter()
-            .map(|(name, kind, rtt_ms)| {
-                let cost = match kind {
-                    DeviceKind::Wifi | DeviceKind::Bluetooth => 50,
-                    _ => 100,
+            .map(|(name, kind, rtt_ms, link_speed_bps)| {
+                let cost = match link_speed_bps {
+                    Some(bps) if bps > 0 => {
+                        used_real_link_speed = true;
+                        ((bps / 1_000_000).max(1)) as u32
+                    }
+                    _ => match kind {
+                        DeviceKind::Wifi | DeviceKind::Bluetooth => 50,
+                        _ => 100,
+                    },
                 };
                 let quality = rtt_ms.map(|r| 100.0 / r.max(0.1)).unwrap_or(1.0);
                 (name, cost, quality)
@@ -625,17 +656,85 @@ fn handle(mut stream: TcpStream, state: &AppState) {
         } else {
             let entry_refs: Vec<(&str, u32, f64)> = entries.iter().map(|(n, c, q)| (n.as_str(), *c, *q)).collect();
             let result = path_optimizer::optimize_path_selection(&entry_refs, budget, 0xC0FFEE);
+            // 最適化結果を実際にMultiPathManagerへ反映する(2026-08-11
+            // 追加、ユーザー指示「最適化結果の実際のトラフィック制御への
+            // 反映」への対応)。best_pathは以後、無効化された経路を
+            // 選択対象から除外する。
+            for name in &result.activate {
+                state.paths.set_enabled(name, true);
+            }
+            for name in &result.deactivate {
+                state.paths.set_enabled(name, false);
+            }
             format!(
-                "Activate / 有効化: {} | Deactivate / 無効化: {} | cost {}/{} | total quality / 総品質 {:.1} | used SBM solution / SBM解を使用: {}",
+                "Activate / 有効化: {} | Deactivate / 無効化: {} | cost {}/{} | total quality / 総品質 {:.1} | used SBM solution / SBM解を使用: {} | cost source / コストの根拠: {}",
                 if result.activate.is_empty() { "(none)".to_string() } else { result.activate.join(", ") },
                 if result.deactivate.is_empty() { "(none)".to_string() } else { result.deactivate.join(", ") },
                 result.total_cost,
                 result.budget,
                 result.total_quality,
-                result.used_sbm_solution
+                result.used_sbm_solution,
+                if used_real_link_speed {
+                    "real link speed (Mbps) / 実測リンク速度(Mbps)"
+                } else {
+                    "placeholder fixed values (link speed unavailable) / 仮の固定値(リンク速度取得不可)"
+                }
             )
         };
         *state.path_optimization_message.lock().unwrap() = Some(message);
+        let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
+        return;
+    }
+    if first_line.starts_with("POST /durability-demo") {
+        let form = parse_form(body_text);
+        let message = form.get("message").cloned().unwrap_or_else(|| "test message".to_string());
+
+        let mut sender = SecureChannel::new(&[0x42u8; 32]);
+        let mut receiver = SecureChannel::new(&[0x42u8; 32]);
+        let encrypted = sender.encrypt(message.as_bytes());
+
+        let mut log_lines = vec![format!("1) encrypt (secure_channel) / 暗号化: {} bytes plaintext -> {} bytes frame", message.len(), encrypted.as_ref().map(|f| f.len()).unwrap_or(0))];
+
+        let demo_text = match encrypted {
+            Ok(frame) => {
+                let wal_path = std::env::temp_dir().join("rs-smarttcp-gui-durability-demo.log");
+                match TransactionLog::open(&wal_path) {
+                    Ok(wal) => match wal.append(&frame) {
+                        Ok(()) => {
+                            log_lines.push(format!("2) durably recorded (transaction_log, fsync) / WALへ確実に記録: {}", wal_path.display()));
+
+                            let frame_for_paths = frame.clone();
+                            let paths: Vec<Box<dyn FnOnce() -> Result<Vec<u8>, String> + Send>> = vec![
+                                Box::new(move || Err::<Vec<u8>, String>("simulated primary link failure / 主経路の疑似障害".to_string())),
+                                Box::new(move || Ok(frame_for_paths)),
+                            ];
+
+                            match redundant_transmission::send_redundant(paths) {
+                                Ok(outcome) => {
+                                    log_lines.push(format!(
+                                        "3) sent via redundant path #{} (redundant_transmission), {} path(s) failed first / 冗長経路#{}経由で送信成功({}本失敗後)",
+                                        outcome.succeeded_path_index, outcome.failed_before_success, outcome.succeeded_path_index, outcome.failed_before_success
+                                    ));
+                                    match receiver.decrypt(&outcome.value) {
+                                        Ok(decrypted) => {
+                                            log_lines.push(format!("4) decrypted and verified (secure_channel) / 復号・検証成功: \"{}\"", String::from_utf8_lossy(&decrypted)));
+                                        }
+                                        Err(e) => log_lines.push(format!("4) decryption failed / 復号失敗: {e}")),
+                                    }
+                                }
+                                Err(e) => log_lines.push(format!("3) all redundant paths failed / 全経路失敗(WALには記録済みのため再送可能): {e}")),
+                            }
+                        }
+                        Err(e) => log_lines.push(format!("2) WAL write failed / WAL書き込み失敗: {e}")),
+                    },
+                    Err(e) => log_lines.push(format!("2) failed to open WAL / WALを開けませんでした: {e}")),
+                }
+                log_lines.join("\n")
+            }
+            Err(e) => format!("1) encryption failed / 暗号化失敗: {e}"),
+        };
+
+        *state.durability_demo_message.lock().unwrap() = Some(demo_text);
         let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
         return;
     }
@@ -667,6 +766,7 @@ fn main() {
         usb_seen: Mutex::new(HashSet::new()),
         usb_check_message: Mutex::new(None),
         path_optimization_message: Mutex::new(None),
+        durability_demo_message: Mutex::new(None),
     };
     let state = Mutex::new(state);
 

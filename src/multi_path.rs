@@ -69,6 +69,18 @@ pub enum DeviceKind {
 struct PathEntry {
     monitor: NetworkQualityMonitor,
     kind: DeviceKind,
+    /// リンク速度(bps)の実測値(2026-08-11追加、ユーザー指示「経路
+    /// コストの実測値化」への対応)。`network_interfaces`が検出できた
+    /// 場合のみ`Some`——検出できない環境(非Windows等)では引き続き
+    /// `None`のまま、呼び出し側が固定値へフォールバックする設計。
+    link_speed_bps: Option<u64>,
+    /// `path_optimizer`等の意思決定で「無効化」された経路かどうか
+    /// (2026-08-11追加、ユーザー指示「最適化結果の実際のトラフィック
+    /// 制御への反映」への対応)。既定`true`(有効)。`false`の経路は
+    /// `best_path`の選択対象から除外される——物理的に接続を切るのでは
+    /// なく、新規トラフィックをこの経路へ積極的に向けない、という
+    /// ソフトウェア側の制御に留まる(正直な開示)。
+    enabled: bool,
 }
 
 pub struct MultiPathManager {
@@ -100,7 +112,7 @@ impl MultiPathManager {
             }
             match iface.kind {
                 InterfaceKind::Ethernet if wired_registered < MAX_WIRED_PATHS => {
-                    mgr.register_device_path(&iface.name, DeviceKind::Other);
+                    mgr.register_device_path_with_speed(&iface.name, DeviceKind::Other, iface.link_speed_bps);
                     wired_registered += 1;
                 }
                 // WiFi・Bluetoothも、それぞれ独立した上限
@@ -109,11 +121,11 @@ impl MultiPathManager {
                 // …複数ブルーツースは最大10チャンネル…同時接続可能に
                 // して」)。
                 InterfaceKind::Wifi if wifi_registered < MAX_WIFI_PATHS => {
-                    mgr.register_device_path(&iface.name, DeviceKind::Wifi);
+                    mgr.register_device_path_with_speed(&iface.name, DeviceKind::Wifi, iface.link_speed_bps);
                     wifi_registered += 1;
                 }
                 InterfaceKind::Bluetooth if bluetooth_registered < MAX_BLUETOOTH_PATHS => {
-                    mgr.register_device_path(&iface.name, DeviceKind::Bluetooth);
+                    mgr.register_device_path_with_speed(&iface.name, DeviceKind::Bluetooth, iface.link_speed_bps);
                     bluetooth_registered += 1;
                 }
                 _ => {}
@@ -132,11 +144,24 @@ impl MultiPathManager {
     /// 登録する。既に登録済みの経路名を指定した場合は種類だけを更新する
     /// (RTT測定値は保持したまま)。
     pub fn register_device_path(&self, name: &str, kind: DeviceKind) {
+        self.register_device_path_with_speed(name, kind, None);
+    }
+
+    /// [`Self::register_device_path`]にリンク速度(bps)の実測値も添える
+    /// バージョン(2026-08-11追加、ユーザー指示「経路コストの実測値化」
+    /// への対応)。`link_speed_bps`が`Some`の場合、既存登録があっても
+    /// 常に最新値へ更新する(接続後にリンク速度が変わることがあるため)。
+    pub fn register_device_path_with_speed(&self, name: &str, kind: DeviceKind, link_speed_bps: Option<u64>) {
         let mut paths = self.paths.lock().unwrap();
         paths
             .entry(name.to_string())
-            .and_modify(|e| e.kind = kind)
-            .or_insert_with(|| PathEntry { monitor: NetworkQualityMonitor::new(), kind });
+            .and_modify(|e| {
+                e.kind = kind;
+                if link_speed_bps.is_some() {
+                    e.link_speed_bps = link_speed_bps;
+                }
+            })
+            .or_insert_with(|| PathEntry { monitor: NetworkQualityMonitor::new(), kind, link_speed_bps, enabled: true });
     }
 
     /// 指定した経路のRTTサンプルを記録する。未登録の経路名なら自動的に
@@ -146,21 +171,45 @@ impl MultiPathManager {
         let mut paths = self.paths.lock().unwrap();
         paths
             .entry(path_name.to_string())
-            .or_insert_with(|| PathEntry { monitor: NetworkQualityMonitor::new(), kind: DeviceKind::Other })
+            .or_insert_with(|| PathEntry { monitor: NetworkQualityMonitor::new(), kind: DeviceKind::Other, link_speed_bps: None, enabled: true })
             .monitor
             .record_rtt(rtt);
     }
 
-    /// 現時点で最もRTTが低い経路名を返す(サンプルが無い経路は除外)。
-    /// 登録済みの経路が1つも無い、またはどの経路にもサンプルが無い
-    /// 場合は`None`(呼び出し側は既定の経路を使うこと)。
+    /// 現時点で最もRTTが低い経路名を返す(サンプルが無い経路・
+    /// [`Self::set_enabled`]で無効化された経路は除外)。登録済みの経路が
+    /// 1つも無い、または対象になる経路が1つも無い場合は`None`
+    /// (呼び出し側は既定の経路を使うこと)。
     pub fn best_path(&self) -> Option<String> {
         let paths = self.paths.lock().unwrap();
         paths
             .iter()
+            .filter(|(_, entry)| entry.enabled)
             .filter_map(|(name, entry)| entry.monitor.smoothed_rtt_ms().map(|rtt| (name.clone(), rtt)))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(name, _)| name)
+    }
+
+    /// 経路の有効/無効を切り替える(2026-08-11追加、ユーザー指示
+    /// 「最適化結果の実際のトラフィック制御への反映」への対応)。
+    /// `path_optimizer::optimize_path_selection`が「無効化すべき」と
+    /// 判断した経路をここで実際に反映し、以後`best_path`の選択対象から
+    /// 除外する。未登録の経路名を指定した場合は何もしない(`false`を
+    /// 返す)。**正直な開示**: これは新規トラフィックの経路選択に
+    /// 影響するのみで、物理的な接続を切断するものではない。
+    pub fn set_enabled(&self, name: &str, enabled: bool) -> bool {
+        let mut paths = self.paths.lock().unwrap();
+        if let Some(entry) = paths.get_mut(name) {
+            entry.enabled = enabled;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 指定した経路が現在有効かどうか(未登録の場合は`None`)。
+    pub fn is_enabled(&self, name: &str) -> Option<bool> {
+        self.paths.lock().unwrap().get(name).map(|e| e.enabled)
     }
 
     /// 現在登録されている経路数。
@@ -173,6 +222,24 @@ impl MultiPathManager {
     pub fn registered_paths(&self) -> Vec<(String, DeviceKind, Option<f64>)> {
         let paths = self.paths.lock().unwrap();
         paths.iter().map(|(name, entry)| (name.clone(), entry.kind, entry.monitor.smoothed_rtt_ms())).collect()
+    }
+
+    /// [`Self::registered_paths`]に、実測リンク速度(bps、未検出なら
+    /// `None`)も添えたバージョン(2026-08-11追加、経路コストの実測値化
+    /// 用途——`path_optimizer`のコスト入力に実測値を渡せるようにする)。
+    pub fn registered_paths_with_link_speed(&self) -> Vec<(String, DeviceKind, Option<f64>, Option<u64>)> {
+        let paths = self.paths.lock().unwrap();
+        paths.iter().map(|(name, entry)| (name.clone(), entry.kind, entry.monitor.smoothed_rtt_ms(), entry.link_speed_bps)).collect()
+    }
+
+    /// [`Self::registered_paths_with_link_speed`]に、現在の有効/無効
+    /// 状態も添えたバージョン(GUI表示用)。
+    pub fn registered_paths_with_status(&self) -> Vec<(String, DeviceKind, Option<f64>, Option<u64>, bool)> {
+        let paths = self.paths.lock().unwrap();
+        paths
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.kind, entry.monitor.smoothed_rtt_ms(), entry.link_speed_bps, entry.enabled))
+            .collect()
     }
 
     /// [`crate::link_diagnostics`]向けの診断一覧を組み立てる。登録済み
@@ -213,6 +280,25 @@ mod tests {
         mgr.record_rtt("eth1", Duration::from_millis(10));
         mgr.record_rtt("wifi", Duration::from_millis(30));
         assert_eq!(mgr.best_path(), Some("eth1".to_string()));
+    }
+
+    #[test]
+    fn disabled_path_is_excluded_from_best_path_even_if_it_has_the_lowest_rtt() {
+        let mgr = MultiPathManager::new();
+        mgr.record_rtt("eth0", Duration::from_millis(50));
+        mgr.record_rtt("eth1", Duration::from_millis(10));
+        assert_eq!(mgr.best_path(), Some("eth1".to_string()), "eth1 must win before being disabled");
+
+        assert!(mgr.set_enabled("eth1", false));
+        assert_eq!(mgr.best_path(), Some("eth0".to_string()), "eth1 must be excluded once disabled, falling back to eth0");
+        assert_eq!(mgr.is_enabled("eth1"), Some(false));
+    }
+
+    #[test]
+    fn set_enabled_on_unregistered_path_returns_false_without_panicking() {
+        let mgr = MultiPathManager::new();
+        assert!(!mgr.set_enabled("nonexistent", false));
+        assert_eq!(mgr.is_enabled("nonexistent"), None);
     }
 
     #[test]
@@ -270,10 +356,10 @@ mod tests {
 
         let report = NetworkInterfaceReport {
             interfaces: vec![
-                NetworkInterface { name: "eth0".to_string(), kind: InterfaceKind::Ethernet, connected: true },
-                NetworkInterface { name: "eth1".to_string(), kind: InterfaceKind::Ethernet, connected: false },
-                NetworkInterface { name: "Wi-Fi".to_string(), kind: InterfaceKind::Wifi, connected: true },
-                NetworkInterface { name: "Bluetooth".to_string(), kind: InterfaceKind::Other, connected: true },
+                NetworkInterface { name: "eth0".to_string(), kind: InterfaceKind::Ethernet, connected: true, link_speed_bps: None },
+                NetworkInterface { name: "eth1".to_string(), kind: InterfaceKind::Ethernet, connected: false, link_speed_bps: None },
+                NetworkInterface { name: "Wi-Fi".to_string(), kind: InterfaceKind::Wifi, connected: true, link_speed_bps: None },
+                NetworkInterface { name: "Bluetooth".to_string(), kind: InterfaceKind::Other, connected: true, link_speed_bps: None },
             ],
         };
         let mgr = MultiPathManager::from_detected_interfaces(&report);
@@ -291,10 +377,10 @@ mod tests {
 
         let report = NetworkInterfaceReport {
             interfaces: vec![
-                NetworkInterface { name: "Wi-Fi".to_string(), kind: InterfaceKind::Wifi, connected: true },
-                NetworkInterface { name: "WiFi USB Dongle".to_string(), kind: InterfaceKind::Wifi, connected: true },
-                NetworkInterface { name: "Bluetooth Network Connection".to_string(), kind: InterfaceKind::Bluetooth, connected: true },
-                NetworkInterface { name: "Bluetooth PAN 2".to_string(), kind: InterfaceKind::Bluetooth, connected: true },
+                NetworkInterface { name: "Wi-Fi".to_string(), kind: InterfaceKind::Wifi, connected: true, link_speed_bps: None },
+                NetworkInterface { name: "WiFi USB Dongle".to_string(), kind: InterfaceKind::Wifi, connected: true, link_speed_bps: None },
+                NetworkInterface { name: "Bluetooth Network Connection".to_string(), kind: InterfaceKind::Bluetooth, connected: true, link_speed_bps: None },
+                NetworkInterface { name: "Bluetooth PAN 2".to_string(), kind: InterfaceKind::Bluetooth, connected: true, link_speed_bps: None },
             ],
         };
         let mgr = MultiPathManager::from_detected_interfaces(&report);
@@ -309,12 +395,13 @@ mod tests {
         use crate::network_interfaces::{InterfaceKind, NetworkInterface, NetworkInterfaceReport};
 
         let mut interfaces: Vec<NetworkInterface> = (0..(MAX_WIFI_PATHS + 3))
-            .map(|i| NetworkInterface { name: format!("wifi{i}"), kind: InterfaceKind::Wifi, connected: true })
+            .map(|i| NetworkInterface { name: format!("wifi{i}"), kind: InterfaceKind::Wifi, connected: true, link_speed_bps: None })
             .collect();
         interfaces.extend((0..(MAX_BLUETOOTH_PATHS + 3)).map(|i| NetworkInterface {
             name: format!("bt{i}"),
             kind: InterfaceKind::Bluetooth,
             connected: true,
+            link_speed_bps: None,
         }));
         let report = NetworkInterfaceReport { interfaces };
         let mgr = MultiPathManager::from_detected_interfaces(&report);
@@ -328,7 +415,7 @@ mod tests {
         use crate::network_interfaces::{InterfaceKind, NetworkInterface, NetworkInterfaceReport};
 
         let interfaces = (0..(MAX_WIRED_PATHS + 2))
-            .map(|i| NetworkInterface { name: format!("eth{i}"), kind: InterfaceKind::Ethernet, connected: true })
+            .map(|i| NetworkInterface { name: format!("eth{i}"), kind: InterfaceKind::Ethernet, connected: true, link_speed_bps: None })
             .collect();
         let report = NetworkInterfaceReport { interfaces };
         let mgr = MultiPathManager::from_detected_interfaces(&report);
