@@ -33,6 +33,35 @@ path依存する」パターンの一員。
 
 ## HANDOFF
 
+- **2026-08-11(続き14) `path_optimizer`+`raid_bridge`をGUIへ実配線
+  (ユーザー指示「未着手、未完成、次フェーズなどを実装して、実用性向上、
+  完成度向上」への対応、前回HANDOFFの「次にすべきこと(1)」)**:
+  1. **「Path selection optimizer (Toshiba SBM)」セクション**を
+     `status_gui.rs`に追加。予算(コスト単位)を入力→
+     `POST /optimize-paths`→登録済み経路(`MultiPathManager::
+     registered_paths`)から仮のコスト(有線/WiFi/Bluetoothで固定値)+
+     RTT実測値ベースの品質スコアを組み立て、`path_optimizer::
+     optimize_path_selection`で実際に有効化/無効化する経路を決定・
+     表示。**正直な開示**: コストは実際の帯域測定ではなく仮の固定値
+     (実配線には契約帯域や実測スループットの入力が必要、次回課題)。
+  2. **「RAID-Z2/Z3 parity accelerator」セクション**を追加、
+     `raid_bridge::detect_parity_accelerator`を実際に呼び、この実機
+     (NVIDIA GT730)で**`Gpu`(CPUフォールバックではない)が実際に
+     検出されることを`curl`で確認**——見せかけではなく実際にGPU経路が
+     選択されていることをGUI上でも可視化した。
+  3. **実機検証**: `cargo build --example status_gui`成功、実際に
+     サーバーを起動し`curl`で(a) RAIDアクセラレータが`Gpu`と表示
+     されること、(b) `POST /optimize-paths`実行後に
+     「Activate: イーサネット 3, イーサネット 2 | ... used SBM
+     solution: true」という正しい最適化結果が表示されることを確認。
+     `cargo test --lib`**80件全green**(regression無し)。
+  - 次にすべきこと: (1) 経路コストを実際の契約帯域/実測スループットに
+    置き換える、(2) `optimize-paths`の結果を実際に`router_features`/
+    トラフィック制御へ反映する(現状は表示のみ、実際に経路を無効化する
+    操作は行わない)、(3) `secure_channel`/`transaction_log`/
+    `redundant_transmission`のGUI可視化(現状はライブラリAPIのみ、
+    GUIへの表示は未着手)。
+
 - **2026-08-11(続き13) 経路選択の東芝SBM最適化(`path_optimizer.rs`)+
   通信品質診断・GUI表示(`link_diagnostics.rs`)を新設(ユーザー指示
   「RS-SmartTCP内に具体的な最適化問題…を発見して実装」+「通信品質に

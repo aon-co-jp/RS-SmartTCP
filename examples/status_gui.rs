@@ -30,6 +30,8 @@ use rs_smarttcp::maintenance;
 use rs_smarttcp::multi_path::{DeviceKind, MultiPathManager};
 use rs_smarttcp::multi_wan::MultiWanManager;
 use rs_smarttcp::network_interfaces;
+use rs_smarttcp::path_optimizer;
+use rs_smarttcp::raid_bridge;
 use rs_smarttcp::router_features::{RouterFeatures, ROUTER_APP_PLUGINS, SECURITY_ROUTER_PLUGINS};
 use rs_smarttcp::usb_protection;
 
@@ -47,6 +49,8 @@ struct AppState {
     usb_seen: Mutex<HashSet<PathBuf>>,
     /// 直近の「新規USBドライブ確認」結果の表示用テキスト。
     usb_check_message: Mutex<Option<String>>,
+    /// 直近の経路選択最適化(東芝SBM)の結果表示用テキスト。
+    path_optimization_message: Mutex<Option<String>>,
 }
 
 fn device_kind_label(kind: DeviceKind) -> &'static str {
@@ -119,6 +123,23 @@ fn render_page(
             )
         })
         .collect();
+
+    let path_optimization_html = state
+        .path_optimization_message
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|m| format!("<div style=\"border:1px solid #ccc; border-radius:6px; padding:10px; margin-top:8px;\">{}</div>", html_escape(m)))
+        .unwrap_or_default();
+
+    let raid_accel_html = match raid_bridge::detect_parity_accelerator() {
+        Some(accel) => format!(
+            "<p><strong>{:?}</strong> (CPU fallback / CPUフォールバック: {})</p>",
+            accel.kind,
+            raid_bridge::is_cpu_fallback(&accel)
+        ),
+        None => "<p>Accelerator detection failed; CPU-only implementation will be used. / アクセラレータ検出に失敗、CPU実装のみで動作します。</p>".to_string(),
+    };
 
     let error_html = probe_error
         .map(|e| format!("<p style=\"color:#c33;\">Probe failed / 疎通確認に失敗しました: {}</p>", html_escape(e)))
@@ -247,6 +268,19 @@ fn render_page(
 {diagnostics_html}
 </table>
 <p style="color:#999; font-size: 0.8em;">Honest disclosure: "automatic improvement" here means best_path already routes traffic to the lowest-RTT healthy link — this cannot physically repair a cable. / 正直な開示: ここでの「自動改善」はbest_pathが既にRTTの最も低い健全な経路へ自動的にトラフィックを寄せていることを指します——物理的なケーブルの修復はできません。</p>
+
+<h2>Path selection optimizer (Toshiba SBM) / 経路選択最適化(東芝SBM)</h2>
+<p style="font-size:0.85em; color:#666;">Selects which measured links to activate under a bandwidth-cost budget, maximizing total link quality (1/RTT), via a Simulated Bifurcation solver. / 帯域コスト予算の下で、通信品質(1/RTT)の合計が最大になる経路の組み合わせをシミュレーテッド分岐で選びます。</p>
+<form method="post" action="/optimize-paths" style="display:flex; gap:8px; align-items:center;">
+<input type="number" name="budget" placeholder="Budget (arbitrary cost units) / 予算" value="200" min="1" required>
+<button type="submit">Optimize / 最適化</button>
+</form>
+{path_optimization_html}
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: for this small a number of links (max 10), brute force finds the exact optimum instantly — this demonstrates wiring SBM into a real decision path, not a necessity. Cost per link is a placeholder (fixed value), not a real bandwidth measurement. / 正直な開示: この規模(最大10経路)なら全探索でも瞬時に厳密解が求まり、SBMを使う実用上の必要性は薄いものです——実際の意思決定パスへの配線実証が目的です。経路ごとのコストは仮の固定値であり、実際の帯域測定ではありません。</p>
+
+<h2>RAID-Z2/Z3 parity accelerator / RAID-Z2/Z3パリティアクセラレータ</h2>
+{raid_accel_html}
+<p style="color:#999; font-size: 0.8em;">Honest disclosure: this reuses open-raid-z + zfs_accel_hlsl as-is (no new RAID implementation here). Only FileBackedDevice (loopback file) is supported today — no real NVMe block device path exists yet. / 正直な開示: open-raid-z + zfs_accel_hlslをそのまま再利用しています(新規RAID実装はありません)。現時点でFileBackedDevice(ループバックファイル)のみ対応で、実NVMeブロックデバイスへの経路はまだありません。</p>
 {error_html}
 <form method="post" action="/probe" style="margin-top: 12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
 <input type="text" name="name" placeholder="Name / 名前 (e.g. NAS)" required>
@@ -566,6 +600,45 @@ fn handle(mut stream: TcpStream, state: &AppState) {
         let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
         return;
     }
+    if first_line.starts_with("POST /optimize-paths") {
+        let form = parse_form(body_text);
+        let budget: u32 = form.get("budget").and_then(|v| v.parse().ok()).unwrap_or(200);
+
+        let registered = state.paths.registered_paths();
+        // 正直な開示: コストは実際の帯域測定値ではなく、デモ用の仮の
+        // 固定値(有線=100、WiFi/Bluetooth=50、その他=150)。品質は
+        // RTT実測値の逆数×100(未測定なら最低品質として1.0を割り当てる)。
+        let entries: Vec<(String, u32, f64)> = registered
+            .into_iter()
+            .map(|(name, kind, rtt_ms)| {
+                let cost = match kind {
+                    DeviceKind::Wifi | DeviceKind::Bluetooth => 50,
+                    _ => 100,
+                };
+                let quality = rtt_ms.map(|r| 100.0 / r.max(0.1)).unwrap_or(1.0);
+                (name, cost, quality)
+            })
+            .collect();
+
+        let message = if entries.is_empty() {
+            "No registered paths to optimize yet. / 最適化対象の登録済み経路がまだありません。".to_string()
+        } else {
+            let entry_refs: Vec<(&str, u32, f64)> = entries.iter().map(|(n, c, q)| (n.as_str(), *c, *q)).collect();
+            let result = path_optimizer::optimize_path_selection(&entry_refs, budget, 0xC0FFEE);
+            format!(
+                "Activate / 有効化: {} | Deactivate / 無効化: {} | cost {}/{} | total quality / 総品質 {:.1} | used SBM solution / SBM解を使用: {}",
+                if result.activate.is_empty() { "(none)".to_string() } else { result.activate.join(", ") },
+                if result.deactivate.is_empty() { "(none)".to_string() } else { result.deactivate.join(", ") },
+                result.total_cost,
+                result.budget,
+                result.total_quality,
+                result.used_sbm_solution
+            )
+        };
+        *state.path_optimization_message.lock().unwrap() = Some(message);
+        let _ = stream.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n");
+        return;
+    }
     if first_line.starts_with("POST /run-maintenance") {
         maintenance_report = Some(maintenance::run_maintenance());
     }
@@ -593,6 +666,7 @@ fn main() {
         wan,
         usb_seen: Mutex::new(HashSet::new()),
         usb_check_message: Mutex::new(None),
+        path_optimization_message: Mutex::new(None),
     };
     let state = Mutex::new(state);
 
