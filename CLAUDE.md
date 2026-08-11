@@ -33,6 +33,32 @@ path依存する」パターンの一員。
 
 ## HANDOFF
 
+- **2026-08-11(続き17) `zfs_accel_hlsl`をWindowsでも常に
+  `default-features = false`へ変更(open-englishのv0.6.0リリースCIで
+  Windows向けビルドが`dxc`未検出で失敗したことを受けての再修正)**:
+  1. **発覚の経緯**: `open-english`のGitHub Actionsリリース
+     ワークフロー(`windows-latest`ランナー)で、続き16の修正
+     (Windowsのみ`gpu`feature既定有効)を初めて実際にCIで踏んだところ、
+     `dxc(DirectX Shader Compiler)が見つかりません`のビルドエラーで
+     失敗。`windows-latest`ランナーにはWindows SDK/Vulkan SDKの
+     `dxc.exe`が入っていない。
+  2. **既存の裏付け**: `open-raid-z`自身の`release.yml`が全く同じ
+     理由(Windows CIに`dxc`が無い)で、Windows向けビルドでも
+     `--no-default-features`(`gpu_accel`無効)を選んでいることを確認。
+     この既存方針に揃え、`rs-smarttcp`側もOS問わず常に
+     `default-features = false`とした(ターゲット別分岐〈続き16〉は
+     撤回し単一の`[dependencies.zfs_accel_hlsl]`へ統合)。
+  3. **実際にGPU/NPUアクセラレーションを使いたい場合**: `dxc`/
+     Windows SDKが揃ったローカル開発機上で個別に`gpu`featureを
+     有効化してビルドする必要がある(CI配布バイナリはCPU
+     フォールバックのみ)。
+  4. **検証**: `cargo test --lib`で既存回帰が無いことを確認(実行中、
+     結果は後続のHANDOFF更新で確定)。
+  - 次にすべきこと: (1) `open-english`のv0.6.0リリースCIを再実行し、
+    Windows向けビルドが成功することを確認、(2) `raid_bridge.rs`の
+    テスト(Z2/Z3自己修復)がCPUフォールバック経路でも引き続き
+    green であることの再確認。
+
 - **2026-08-11(続き16) `zfs_accel_hlsl`のWindows専用`gpu`featureが
   既定有効のままだったため、`rs-smarttcp`をpath依存する下流(RPoem経由の
   `open-english-server`)のAndroidクロスコンパイルが壊れていたバグを
