@@ -7,19 +7,37 @@
 //! ## 正直な開示(最重要)
 //!
 //! - **バス種別(USB/PCIe/オンボード)は区別できない**: Windowsの標準
-//!   ネットワークAPI(`ipconfig`が使う経路)は、物理的な接続方式
-//!   (USBアダプタか、PCIeカードか、マザーボード直付けか)を区別せず、
-//!   すべて等しく「イーサネットアダプタ」として見える。この違いを
-//!   区別するにはWMI(`Win32_NetworkAdapter`のバス種別プロパティ)への
-//!   問い合わせが必要で、より複雑な実装になる——今回はユーザー要望の
-//!   本質(「有線LANが何本つながっているか」の検出)を満たすため、
-//!   バス種別の区別は行わない設計とした。
+//!   ネットワークAPIは、物理的な接続方式(USBアダプタか、PCIeカードか、
+//!   マザーボード直付けか)を区別せず、すべて等しく「イーサネット
+//!   アダプタ」として見える。この違いを区別するにはWMIのバス種別
+//!   プロパティへの問い合わせが必要で、より複雑な実装になる——今回は
+//!   ユーザー要望の本質(「有線LANが何本つながっているか」の検出)を
+//!   満たすため、バス種別の区別は行わない設計とした。
 //! - **外部クレート非依存を維持**: このクレートの既存方針
 //!   (`#![no unsafe]`、std以外への依存なし)に従い、Windows標準の
-//!   `ipconfig`コマンドを`std::process::Command`で呼び出しテキスト
-//!   出力を解析する(WMI/`windows`クレートのような追加依存は導入しない)。
-//! - **Windows専用**: `ipconfig`はWindowsのコマンドのため、この機能は
-//!   Windows上でのみ動作する。他OSでは空の結果を返す(パニックしない)。
+//!   PowerShell(`Get-NetAdapter`)を`std::process::Command`で呼び出し
+//!   テキスト出力を解析する(`windows`クレートのような追加依存は
+//!   導入しない)。
+//! - **Windows専用**: この機能はWindows上でのみ動作する。他OSでは
+//!   空の結果を返す(パニックしない)。
+//!
+//! ## 実機検証で発見・修正した実バグ(`ipconfig`解析 → `Get-NetAdapter`へ変更)
+//!
+//! 当初`ipconfig`のテキスト出力を解析していたが、実機検証(日本語版
+//! Windows)で「イーサネットアダプターの文字の下の行などが全ての行で
+//! 文字化けして読めません」という報告があった。原因は`ipconfig`の
+//! 既定出力がシステムのANSIコードページ(Shift-JIS/cp932)であり、
+//! `chcp 65001`でコンソールのコードページを切り替えても、`ipconfig`
+//! 自身がローカライズ済みのアダプタ表示名(「イーサネット」等)を
+//! 内部的に別経路でレンダリングするためか、文字化けが解消しなかった
+//! こと。**根本対応として、`ipconfig`のテキスト解析自体をやめ、
+//! PowerShellの`Get-NetAdapter`が返す構造化データ(`Status`・
+//! `PhysicalMediaType`)を使う方式へ変更した**——`PhysicalMediaType`は
+//! `"802.3"`(有線イーサネット)・`"Native 802.11"`(WiFi)のような
+//! **英数字の技術定数**であり、Windows表示言語に関わらず値が変わらない
+//! ため、ロケール依存の文字化け問題自体が原理的に起こらない。アダプタ
+//! 名(`Name`)も`[Console]::OutputEncoding`をUTF-8へ明示的に設定した
+//! 上でPowerShellから取得するため、日本語名でも正しく読める。
 
 use std::process::Command;
 
@@ -34,8 +52,6 @@ pub enum InterfaceKind {
 pub struct NetworkInterface {
     pub name: String,
     pub kind: InterfaceKind,
-    /// IPv4アドレスが取得できている(=リンクが繋がっている)かどうかの
-    /// 簡易判定。
     pub connected: bool,
 }
 
@@ -54,85 +70,48 @@ impl NetworkInterfaceReport {
     }
 }
 
-/// `ipconfig`の出力を解析する(テスト容易性のため、実行部分と分離)。
-/// 各アダプタブロックは空行で区切られ、1行目に
-/// `"Ethernet adapter <name>:"`または`"Wireless LAN adapter <name>:"`
-/// のような見出しが来て、以降のインデント行に`IPv4 Address`等が続く
-/// (英語版Windowsの書式。日本語版Windowsでは見出しが「イーサネット
-/// アダプター」「Wireless LAN アダプター」等になるため、両対応する)。
-pub fn parse_ipconfig_output(output: &str) -> NetworkInterfaceReport {
+/// `Get-NetAdapter`の1行区切りテキスト出力(`Name||Status||
+/// PhysicalMediaType`形式、`detect()`が生成するコマンドの出力形式)を
+/// 解析する(テスト容易性のため実行部分と分離)。
+pub fn parse_netadapter_output(output: &str) -> NetworkInterfaceReport {
     let mut interfaces = Vec::new();
-    let mut current: Option<NetworkInterface> = None;
-
     for line in output.lines() {
-        let trimmed = line.trim_end();
+        let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if !line.starts_with(' ') && !line.starts_with('\t') && trimmed.contains(':') {
-            // 新しいアダプタの見出し行。
-            if let Some(iface) = current.take() {
-                interfaces.push(iface);
-            }
-            let header = trimmed.trim_end_matches(':');
-            let kind = if header.to_lowercase().contains("wireless") || header.contains("Wi-Fi") || header.contains("WLAN") {
-                InterfaceKind::Wifi
-            } else if header.to_lowercase().contains("ethernet") || header.contains("イーサネット") {
-                InterfaceKind::Ethernet
-            } else {
-                InterfaceKind::Other
-            };
-            current = Some(NetworkInterface { name: header.to_string(), kind, connected: false });
-        } else if let Some(iface) = current.as_mut() {
-            let lower = trimmed.to_lowercase();
-            if lower.contains("ipv4") && trimmed.contains('.') {
-                iface.connected = true;
-            }
-            if lower.contains("media disconnected") || lower.contains("メディアは接続されていません") {
-                iface.connected = false;
-            }
+        let parts: Vec<&str> = trimmed.split("||").collect();
+        if parts.len() != 3 {
+            continue;
         }
+        let (name, status, media_type) = (parts[0].trim(), parts[1].trim(), parts[2].trim());
+        let media_lower = media_type.to_lowercase();
+        let kind = if media_lower.contains("802.11") || media_lower.contains("native 802.11") {
+            InterfaceKind::Wifi
+        } else if media_lower.contains("802.3") {
+            InterfaceKind::Ethernet
+        } else {
+            InterfaceKind::Other
+        };
+        let connected = status.eq_ignore_ascii_case("up");
+        interfaces.push(NetworkInterface { name: name.to_string(), kind, connected });
     }
-    if let Some(iface) = current.take() {
-        interfaces.push(iface);
-    }
-
     NetworkInterfaceReport { interfaces }
 }
 
-/// 実際に`ipconfig`を実行して現在のネットワークインターフェース状況を
-/// 取得する。Windows以外・コマンド実行失敗時は空のレポートを返す
-/// (パニックしない、正直な開示として`interfaces`が空のまま)。
-///
-/// **実機検証で発見・修正した実バグ**: 日本語版Windowsでは`ipconfig`の
-/// 既定出力エンコーディングがシステムのANSIコードページ(Shift-JIS/
-/// cp932)であり、これを素朴に`String::from_utf8_lossy`で解釈すると
-/// 日本語のアダプタ名(「イーサネット アダプター」等)が文字化けし、
-/// 種別判定(Ethernet/Wifi)にも失敗する実バグがあった。外部クレート
-/// (`encoding_rs`等)を追加せずに解決するため、`cmd /C chcp 65001 >nul
-/// && ipconfig`という形でコードページを一時的にUTF-8(65001)へ切り替えた
-/// 上で`ipconfig`を実行する(`chcp`はコマンド実行環境=起動した
-/// `cmd`プロセス内でのみ有効なため、呼び出し元プロセスや他の処理には
-/// 影響しない)。
-///
-/// **正直な開示・既知の残存制限**: 上記の対応で見出し行("Ethernet
-/// adapter"/"Wireless LAN adapter")の判定・接続本数のカウント・
-/// 種別判定は実機で正しく動作することを確認済みだが、アダプタの
-/// **表示名自体**(Windows側がローカライズして付けた既定名、例:
-/// 「イーサネット」)は、`chcp`切り替え後もなお文字化けする既知の
-/// 制限が残っている(Windowsコンソールの内部的なコードページ処理の
-/// 制約、`ipconfig`側の実装に起因)。機能面(本数・種別・接続状態の
-/// 正誤判定)には影響しないため、追加の外部クレート導入を伴う完全な
-/// 解決は今回のスコープ外とした——名前表示の完全な文字化け解消には
-/// PowerShellの`Get-NetAdapter`(構造化出力)への切り替え等が必要。
+/// 実際に`Get-NetAdapter`を実行して現在のネットワークインターフェース
+/// 状況を取得する。Windows以外・コマンド実行失敗時は空のレポートを
+/// 返す(パニックしない、正直な開示として`interfaces`が空のまま)。
 pub fn detect() -> NetworkInterfaceReport {
     if !cfg!(windows) {
         return NetworkInterfaceReport::default();
     }
-    match Command::new("cmd").args(["/C", "chcp 65001 >nul && ipconfig"]).output() {
+    let script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+Get-NetAdapter | ForEach-Object { $_.Name + '||' + $_.Status + '||' + $_.PhysicalMediaType }";
+    match Command::new("powershell").args(["-NoProfile", "-Command", script]).output() {
         Ok(out) => {
             let text = String::from_utf8_lossy(&out.stdout);
-            parse_ipconfig_output(&text)
+            parse_netadapter_output(&text)
         }
         Err(_) => NetworkInterfaceReport::default(),
     }
@@ -143,41 +122,40 @@ mod tests {
     use super::*;
 
     const SAMPLE_OUTPUT: &str = "\
-Windows IP Configuration
-
-Ethernet adapter Ethernet:
-
-   Connection-specific DNS Suffix  . :
-   IPv4 Address. . . . . . . . . . . : 192.168.0.10
-   Subnet Mask . . . . . . . . . . . : 255.255.255.0
-
-Ethernet adapter Ethernet 2:
-
-   Media State . . . . . . . . . . . : Media disconnected
-
-Wireless LAN adapter Wi-Fi:
-
-   Connection-specific DNS Suffix  . :
-   IPv4 Address. . . . . . . . . . . : 192.168.0.20
-   Subnet Mask . . . . . . . . . . . : 255.255.255.0
+Ethernet||Up||802.3
+Ethernet 2||Disconnected||802.3
+Ethernet 3||Up||802.3
+Wi-Fi||Disconnected||Native 802.11
 ";
 
     #[test]
     fn parses_connected_and_disconnected_ethernet_adapters() {
-        let report = parse_ipconfig_output(SAMPLE_OUTPUT);
-        assert_eq!(report.wired_connected_count(), 1, "only one of the two Ethernet adapters has an IPv4 address");
+        let report = parse_netadapter_output(SAMPLE_OUTPUT);
+        assert_eq!(report.wired_connected_count(), 2, "two of the three Ethernet adapters are Up");
+    }
+
+    #[test]
+    fn parses_wifi_adapter_by_physical_media_type_not_connected() {
+        let report = parse_netadapter_output(SAMPLE_OUTPUT);
+        assert!(!report.wifi_connected());
     }
 
     #[test]
     fn parses_connected_wifi_adapter() {
-        let report = parse_ipconfig_output(SAMPLE_OUTPUT);
+        let report = parse_netadapter_output("Wi-Fi||Up||Native 802.11\n");
         assert!(report.wifi_connected());
     }
 
     #[test]
     fn empty_output_yields_empty_report() {
-        let report = parse_ipconfig_output("");
+        let report = parse_netadapter_output("");
         assert_eq!(report.wired_connected_count(), 0);
         assert!(!report.wifi_connected());
+    }
+
+    #[test]
+    fn preserves_japanese_adapter_names_without_mojibake() {
+        let report = parse_netadapter_output("イーサネット||Up||802.3\n");
+        assert_eq!(report.interfaces[0].name, "イーサネット");
     }
 }
