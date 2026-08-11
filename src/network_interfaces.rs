@@ -45,6 +45,10 @@ use std::process::Command;
 pub enum InterfaceKind {
     Ethernet,
     Wifi,
+    /// 2026-08-11追加(ユーザー指示「複数LAN＋複数WiFi＋複数ブルー
+    /// ツゥース対応」への対応)。Bluetoothネットワーク接続アダプタ
+    /// (`PhysicalMediaType`が`"Bluetooth"`)を区別する。
+    Bluetooth,
     Other,
 }
 
@@ -68,6 +72,19 @@ impl NetworkInterfaceReport {
     pub fn wifi_connected(&self) -> bool {
         self.interfaces.iter().any(|i| i.kind == InterfaceKind::Wifi && i.connected)
     }
+
+    /// 接続中のWiFiアダプタの本数(2026-08-11追加、ユーザー指示「複数
+    /// WiFi対応」——内蔵WiFi+USB WiFiドングル等、複数枚刺さっている
+    /// 環境向け)。
+    pub fn wifi_connected_count(&self) -> usize {
+        self.interfaces.iter().filter(|i| i.kind == InterfaceKind::Wifi && i.connected).count()
+    }
+
+    /// 接続中のBluetoothネットワークアダプタの本数(2026-08-11追加、
+    /// ユーザー指示「複数ブルーツゥース対応」)。
+    pub fn bluetooth_connected_count(&self) -> usize {
+        self.interfaces.iter().filter(|i| i.kind == InterfaceKind::Bluetooth && i.connected).count()
+    }
 }
 
 /// `Get-NetAdapter`の1行区切りテキスト出力(`Name||Status||
@@ -90,6 +107,8 @@ pub fn parse_netadapter_output(output: &str) -> NetworkInterfaceReport {
             InterfaceKind::Wifi
         } else if media_lower.contains("802.3") {
             InterfaceKind::Ethernet
+        } else if media_lower.contains("bluetooth") {
+            InterfaceKind::Bluetooth
         } else {
             InterfaceKind::Other
         };
@@ -151,6 +170,15 @@ Wi-Fi||Disconnected||Native 802.11
         let report = parse_netadapter_output("");
         assert_eq!(report.wired_connected_count(), 0);
         assert!(!report.wifi_connected());
+    }
+
+    #[test]
+    fn classifies_bluetooth_network_adapters_and_counts_multiple_wifi() {
+        let report = parse_netadapter_output(
+            "Wi-Fi||Up||Native 802.11\nWiFi USB Dongle||Up||Native 802.11\nBluetooth Network Connection||Up||Bluetooth\n",
+        );
+        assert_eq!(report.wifi_connected_count(), 2, "must count both WiFi adapters");
+        assert_eq!(report.bluetooth_connected_count(), 1);
     }
 
     #[test]

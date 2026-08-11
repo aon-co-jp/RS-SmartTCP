@@ -33,6 +33,46 @@ path依存する」パターンの一員。
 
 ## HANDOFF
 
+- **2026-08-11(続き2) ルーター/NAS/外付けHDD/PC/タブレット/スマホ/TV/
+  ゲーム機への経路登録+複数WiFi・複数Bluetooth対応(ユーザー指示
+  「ルーターと外付けHDDやNASなどに複数LANケーブル1本から最大4本＋WiFi
+  も追加可能にして対応して」→「PC、タブレット、スマホ、TV、ゲーム
+  マシンなどと…対応して」→「複数LAN＋複数WiFi＋複数ブルーツゥース
+  対応として…対応して」)**:
+  1. **`DeviceKind`を新設**(`multi_path.rs`): Router/Nas/
+     ExternalStorage/Pc/Tablet/Phone/Tv/GameConsole/Wifi/Bluetooth/
+     Otherの11種類。`MultiPathManager::register_device_path(name,
+     kind)`でラベル付きの経路登録ができる(経路選択ロジック自体は
+     ラベルに関わらずRTTのみで判定、ラベルはGUI表示用)。
+  2. **`MultiPathManager::from_detected_interfaces()`新設**:
+     `network_interfaces::detect()`の結果から、接続中の有線LAN
+     (最大[`MAX_WIRED_PATHS`]=4本)+WiFi(複数枚、上限なし)+
+     Bluetooth(複数、上限なし)を自動的に経路登録する——有線のみ
+     4本の上限を設け、WiFi/Bluetoothは複数枚挿さっている環境を
+     想定し上限を設けない設計。
+  3. **`InterfaceKind::Bluetooth`を新設**(`network_interfaces.rs`):
+     `Get-NetAdapter`の`PhysicalMediaType`が`"Bluetooth"`のアダプタを
+     区別。`wifi_connected_count()`・`bluetooth_connected_count()`
+     (複数枚対応のカウント、旧来の`wifi_connected()`は単一WiFiのみを
+     前提とした真偽値だったため複数対応の集計メソッドを追加)。
+  4. **`examples/status_gui.rs`を拡張**: ルーター/NAS/外付けHDD等の
+     IPアドレスを入力すると、TCP接続確立時間(管理者権限不要な簡易
+     疎通確認、ICMP pingではないことを明記)を実測し、経路一覧へ
+     追加・最良経路を太字ハイライト表示するフォームを実装。
+     **実機検証**: 実際のデフォルトゲートウェイ(ルーター、
+     `192.168.0.1:80`)へ疎通確認を行い、実測1.5msで正しく最良経路
+     判定されることを確認済み(型チェックのみで完了と報告しない
+     方針の徹底)。
+  5. **検証**: `cargo test`**23件全green**(既存18件+新規5件)。
+     実際に`status_gui`を起動し、`curl`・実ブラウザ操作の両方で
+     Bluetooth判定・複数WiFi/Bluetoothカウント表示・ルーターへの
+     実測疎通確認をすべて確認済み。
+  - 次にすべきこと: (1) `open-web-server-wire`側から`MultiPathManager`/
+    `BandwidthPolicy`を実際に呼び出す配線は引き続き未着手、(2) PC/
+    タブレット/スマホ/TV/ゲーム機の種別は現状「ユーザーが手動でGUIから
+    選んでラベル付けする」設計であり、接続先の機器種別を自動判定する
+    機能(例: MACアドレスベンダー判定等)は今回のスコープ外。
+
 - **2026-08-11(続き) アダプタ表示名の文字化けを根本解消
   (`ipconfig`解析 → `Get-NetAdapter`へ変更、ユーザー報告「イーサネット
   アダプターの文字の下の行などが全ての行で文字化けして読めません」への
